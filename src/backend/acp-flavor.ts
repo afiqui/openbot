@@ -407,6 +407,8 @@ export interface AcpFlavor {
    * skips each tool of a server whose name breaks the rule, with no error.
    */
   mcpServerName?(name: string): string;
+  /** Provider-specific metadata for OpenBot tools in MCP tools/list. */
+  mcpToolMetadata?(server: string, tool: string): DynamicRecord | undefined;
   /**
    * The MCP server names in the agent's own files for `cwd`. The agent starts its own entry in place
    * of a session server with the same name, so that server travels as `openbot_<name>`. `argv` is

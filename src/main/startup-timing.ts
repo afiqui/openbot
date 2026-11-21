@@ -218,6 +218,23 @@ export class StartupTiming {
       properties.slowest_service_step = slowest.step;
       properties.slowest_service_step_ms = quantize(slowest.ms);
     }
+    const preparationStart = markMs("database-preparation-start");
+    const preparationEnd = markMs("database-preparation-end");
+    // A local report lets the owner measure startup without enabling analytics. No identity,
+    // conversation, path, credential or provider data is included.
+    Effect.runFork(
+      writePreferenceFile(join(this.#options.userDataPath, "startup-timing-last.json"), {
+        version: 1,
+        appVersion: this.#options.appVersion,
+        recordedAt: Date.now(),
+        properties,
+        loadingWindowReadyMs: markMs("loading-window-ready"),
+        databasePreparationMs:
+          preparationStart !== undefined && preparationEnd !== undefined
+            ? Math.max(0, preparationEnd - preparationStart)
+            : undefined,
+      }).pipe(Effect.ignore),
+    );
     this.#options.send(properties);
   }
 }

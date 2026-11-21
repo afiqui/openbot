@@ -75,6 +75,7 @@ import {
   claudeHistoryReader,
   claudeTaskTurnId,
 } from "./claude-history";
+import type { ClaudeHistoryReaderFactory } from "./claude-history-host-protocol";
 import { readClaudeStoredSignIn } from "./claude-stored-sign-in";
 import {
   CLAUDE_WORKSPACE_MANAGED_SETTINGS,
@@ -912,6 +913,7 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
     historyIndexDirectory?: string,
     fallbackApiKey?: () => string | null,
     userSetup: () => boolean = () => false,
+    historyReaderFactory: ClaudeHistoryReaderFactory = claudeHistoryReader,
   ) {
     super();
     this.#cli = cli;
@@ -940,7 +942,7 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
     };
     this.readHistory = readSessionMessages
       ? claudeHistoryFromMessages(readSessionMessages)
-      : claudeHistoryReader(historyOptions);
+      : historyReaderFactory(historyOptions);
   }
 
   get running(): boolean {

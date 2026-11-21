@@ -10,17 +10,44 @@
 // Run: bun scripts/routine-flow-sweep-e2e.ts
 // Writes .openbot-build/routine-flow-sweep-e2e/report.json and exits non-zero on a failure.
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { Effect } from "effect";
 import { runCauseEffect } from "../src/backend/effect-boundary";
 import { OpenBotDatabase } from "../src/backend/openbot-database";
 import { RoutineFlowStore } from "../src/backend/routine-flows/routine-flow-store";
 import { createRoutineFlows } from "../src/backend/routine-flows/routine-flows";
 
-const OUT = resolve(import.meta.dirname, "../.openbot-build/routine-flow-sweep-e2e");
+const projectRoot = process.env.OPENBOT_SWEEP_TEST_ROOT ?? resolve(import.meta.dirname, "..");
+const OUT = join(projectRoot, ".openbot-build/routine-flow-sweep-e2e");
+// Match production node:sqlite. Bun's compatibility connection can retain Windows fixture locks.
+if (typeof Bun !== "undefined") {
+  mkdirSync(OUT, { recursive: true });
+  const built = await Bun.build({
+    entrypoints: [import.meta.filename],
+    target: "node",
+    format: "esm",
+    outdir: OUT,
+    naming: "fixture.mjs",
+  });
+  assert.ok(built.success, String(built.logs));
+  const child = spawnSync("node", [join(OUT, "fixture.mjs")], {
+    cwd: projectRoot,
+    env: { ...process.env, OPENBOT_SWEEP_TEST_ROOT: projectRoot },
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 60_000,
+  });
+  // Machine-readable fixture output.
+  process.stdout.write(child.stdout);
+  process.stderr.write(child.stderr);
+  assert.ifError(child.error);
+  assert.equal(child.status, 0, "The routine sweep SQLite fixture failed.");
+  process.exit(0);
+}
 const QUARTER_HOUR_MS = 15 * 60 * 1000;
 /** A 15-minute routine runs 672 times in the 7 days a sweep looks back. */
 const SOLO_RUNS = 672;
@@ -280,6 +307,8 @@ try {
   database.close();
   mkdirSync(OUT, { recursive: true });
   writeFileSync(join(OUT, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
+  assert.equal(dirname(resolve(root)), resolve(tmpdir()));
+  assert.ok(basename(root).startsWith("openbot-routine-flow-sweep-"));
   await rm(root, { recursive: true, force: true });
 }
 process.stdout.write(

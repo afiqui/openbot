@@ -56,7 +56,12 @@ const cuaDriverPath = resolve(resourcesPath, "cua-driver/darwin", architecture);
 // The database host is spawned by path as its own process, so it has to survive the asar unchanged.
 // Packed into app.asar it would still be readable, but `utilityProcess` cannot start it from there.
 const databaseHostPath = resolve(resourcesPath, "app.asar.unpacked/out/main/agent-database-host.js");
+const routineFlowDiscoveryHostPath = resolve(
+  resourcesPath,
+  "app.asar.unpacked/out/main/routine-flow-discovery-host.js",
+);
 const voiceHostPath = resolve(resourcesPath, "app.asar.unpacked/out/main/voice-transcription-host.js");
+const claudeHistoryHostPath = resolve(resourcesPath, "app.asar.unpacked/out/main/claude-history-host.js");
 const speechHostPath = resolve(resourcesPath, "app.asar.unpacked/out/main/voice-speech-host.js");
 
 await Promise.all([
@@ -71,6 +76,8 @@ await Promise.all([
     ),
   ),
   access(resolve(resourcesPath, "app.asar")),
+  access(routineFlowDiscoveryHostPath),
+  access(claudeHistoryHostPath),
   access(packagedIconPath),
   access(sourceIconPath),
   access(resolve(resourcesPath, "licenses/Electron-LICENSE")),

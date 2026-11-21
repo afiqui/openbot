@@ -40,6 +40,14 @@ streams, temporary files, permits, and pending callbacks. Forward cancellation o
 adapters that support it. Cancellation does not make a database write or a remote mutation
 safe to replay. Keep domain retry and recovery rules at their existing owners.
 
+Routine flow and result sweeps discover ended owner runs, pending handoffs and answers without
+result deliveries in separate read-only utility processes. Each opens canonical `openbot.db`
+without migrations and accepts only three fixed, paged queries. It returns run IDs, not run
+instructions, destinations or answers. The main service revalidates each discovered run and keeps
+every state change on its own write connection. Each routine runtime owns
+the reader's close; cancellation or a read deadline terminates its process. Source fixtures that
+omit the reader keep the original synchronous discovery path.
+
 ## Change rules
 
 1. Put a type in `packages/contracts` only when it crosses a process or application boundary.

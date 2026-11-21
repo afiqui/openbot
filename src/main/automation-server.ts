@@ -26,6 +26,11 @@ import { Effect, Exit, Schema, Scope, Semaphore } from "effect";
 import { AgentSettingsRefused } from "../backend/agent/agent-settings-refused";
 import { InactiveAttentionRequest } from "../backend/agent/inactive-attention-request";
 import { type ModelRequest, requestedRuntime } from "../backend/agent/model-tools";
+import {
+  dispatchQueuedWorkToolSchema,
+  type QueuedWorkCandidate,
+  type QueuedWorkDispatchResult,
+} from "../backend/agent/server-work-backlog";
 import type { AgentLifecycleFailed, AgentService } from "../backend/agent-service";
 import { writeFileAtomically } from "../backend/atomic-json-file";
 import { AUTOMATION_HEADERS_FILE, AUTOMATION_TOKEN_FILE, AUTOMATION_URL_FILE } from "../backend/automation-command";
@@ -42,7 +47,7 @@ const HOUR_MS = 60 * 60 * 1000;
 const BODY_LIMIT_BYTES = 32 * 1024;
 const RUN_PATH = /^\/v1\/agents\/([^/]+)\/routines\/([^/]+)\/run$/;
 const AGENT_PATH =
-  /^\/v1\/agents\/([^/]+)\/(messages|pending|settings|context\/clear|deliveries\/([^/]+)|prompts\/([^/]+)\/answer|approvals\/([^/]+)\/respond)$/;
+  /^\/v1\/agents\/([^/]+)\/(messages|pending|settings|context\/clear|deliveries\/([^/]+)|prompts\/([^/]+)\/answer|approvals\/([^/]+)\/respond|queued-work|queued-work\/dispatch)$/;
 /** A delivery in one of these states has no more work. Its turn's answer is final. */
 const ENDED_DELIVERY_STATUSES: ReadonlySet<QueueDelivery["status"]> = new Set([
   "completed",
@@ -95,6 +100,16 @@ export interface AutomationServerOptions {
   updateAgent: (input: UpdateAgentInput) => Effect.Effect<UpdatedAgent, { readonly cause: unknown }>;
   /** The same as **New chat** in the agent's settings. It fails with `ContextResetBusyError` while the agent works. */
   clearAgentContext: (agentId: string) => Effect.Effect<void, { readonly cause: unknown }>;
+  /** Custom host queue administration. It moves selected deliveries; it never sends another message. */
+  listQueuedWork?: (agentId: string) => QueuedWorkCandidate[];
+  dispatchQueuedWork?: (
+    agentId: string,
+    input: {
+      deliveryId: string;
+      title?: string;
+      taskId?: string;
+    },
+  ) => Effect.Effect<QueuedWorkDispatchResult, { readonly cause: unknown }>;
 }
 
 /**
@@ -263,6 +278,11 @@ export class AutomationServer {
     encodedRequestId: string | undefined,
   ): Promise<void> {
     this.#requireAgent(agentId);
+    if (route === "queued-work") {
+      if (request.method !== "GET") return send(response, 405, { error: "method not allowed" });
+      if (!this.#options.listQueuedWork) return send(response, 404, { error: "not found" });
+      return send(response, 200, { queued: this.#options.listQueuedWork(agentId) });
+    }
     if (route.startsWith("deliveries/")) {
       if (request.method !== "GET") return send(response, 405, { error: "method not allowed" });
       const deliveryId = encodedRequestId === undefined ? null : decodePathPart(encodedRequestId);
@@ -292,6 +312,21 @@ export class AutomationServer {
     const value = await readJson(request);
     // The setting can change while the script uploads its body.
     const agent = this.#requireAgent(agentId);
+    if (route === "queued-work/dispatch") {
+      const dispatch = this.#options.dispatchQueuedWork;
+      if (!dispatch) return send(response, 404, { error: "not found" });
+      const parsed = dispatchQueuedWorkToolSchema.safeParse(value);
+      if (!parsed.success) throw new HttpError(400, "Send deliveryId and optional title or taskId only.");
+      const now = this.#takeSlot(agentId);
+      try {
+        const result = await runCauseEffect(dispatch(agentId, parsed.data));
+        return send(response, 202, result);
+      } catch (error) {
+        this.#releaseSlot(agentId, now);
+        if (error instanceof Error) throw new HttpError(409, error.message);
+        throw error;
+      }
+    }
     if (route === "settings") {
       const { runtime, providerAccountId } = settingsRequest(value);
       // The same resolution as the agent's `update_profile` tool: a model names its provider, and an

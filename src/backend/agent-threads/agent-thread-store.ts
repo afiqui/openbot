@@ -101,6 +101,8 @@ export interface AgentThreadBranchInput {
 }
 
 export interface AgentThreadInput {
+  /** An internal stable work id. Never accepted from a released client payload. */
+  threadId?: string;
   agentId: string;
   origin: AgentThreadOrigin;
   title: string;
@@ -125,6 +127,15 @@ export class AgentThreadStore {
   }
 
   /** The thread by its task id: the legacy task id, or the thread id of a newer thread. */
+  /** A failed first send can discard only a task with no committed conversation rows. */
+  hasMessages(threadId: string): boolean {
+    return (
+      this.#database.connection
+        .prepare("SELECT 1 FROM projection_thread_messages WHERE thread_id = ? LIMIT 1")
+        .get(threadId) !== undefined
+    );
+  }
+
   task(taskId: string): AgentThreadRecord | null {
     const row = databaseRow(
       this.#database.connection
@@ -402,7 +413,7 @@ export class AgentThreadStore {
 
   /** Creates the side thread and its conversation in one transaction. */
   create(input: AgentThreadInput): AgentThreadRecord {
-    const threadId = `openbot-thread-${randomUUID()}`;
+    const threadId = input.threadId ?? `openbot-thread-${randomUUID()}`;
     this.#database.dispatch(
       `agent-thread:${threadId}`,
       [

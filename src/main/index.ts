@@ -177,6 +177,7 @@ import { OWNER_PIN_KEY } from "./sidebar-pin-store";
 import { StartAttempts, takeForcedStartFailure } from "./start-attempts";
 import { compatiblePreviousRelease, readDatabaseSchemaVersion } from "./start-recovery-release";
 import { openStartRecoveryWindow, type StartRecovery } from "./start-recovery-window";
+import { openStartupLoadingWindow, type StartupLoadingWindow } from "./startup-loading-window";
 import { trustSystemCertificates } from "./system-certificates";
 import { systemHourCycle } from "./system-hour-cycle";
 import { TeardownRegistry } from "./teardown-registry";
@@ -545,6 +546,7 @@ protocol.registerSchemesAsPrivileged([
  * treats a null as a recoverable state beyond the startup window it really is.
  */
 let services: ApplicationServices | null = null;
+let startupLoadingWindow: StartupLoadingWindow | null = null;
 let activeRemotePrincipalId: string | null = null;
 /** Counts account transitions, so queued work for a superseded one is dropped rather than applied. */
 let centralAuthGeneration = 0;
@@ -896,6 +898,7 @@ function registerIpcHandlers({
   interfaceSize,
   notificationPreference,
   busyMessageMode,
+  customMessageRouting,
   agentDefaults,
   agentMemoryLimit,
   memoryReview,
@@ -989,6 +992,7 @@ function registerIpcHandlers({
       analyticsPreferences,
       approvalAutomation,
       busyMessageMode,
+      customMessageRouting,
       agentDefaults,
       agentMemoryLimit,
       remoteSessionReuse,
@@ -1692,6 +1696,22 @@ if (!hasSingleInstanceLock) {
       // After the main window exists: on Windows and Linux, the last closed window quits the app.
       recovery?.close();
 
+      if (
+        !localServerChild &&
+        !serverMode &&
+        !hostedServer &&
+        !(developmentRemoteRole === "host" && developmentTestClientEnabled)
+      ) {
+        startupLoadingWindow = openStartupLoadingWindow({
+          translate: translateFor(resolveLocale("system", app.getLocale())),
+          iconPath: appIconPath,
+          quit: () => app.quit(),
+        });
+        void startupLoadingWindow.ready.catch((error: unknown) =>
+          logger.warn("The startup loading page could not load:", toLogValue(error)),
+        );
+      }
+
       const built = await createApplicationServices({
         mainWindow,
         windows,
@@ -2033,6 +2053,8 @@ if (!hasSingleInstanceLock) {
       // The island pages load beside the main window, not before it.
       reconcileDynamicIsland();
       await windows.loadRenderer(mainWindow);
+      startupLoadingWindow?.close();
+      startupLoadingWindow = null;
       performance.mark("openbot:renderer-loaded");
       // The start is finished: the database is open and the main window loaded.
       startAttempts?.finished();
@@ -2143,6 +2165,8 @@ if (!hasSingleInstanceLock) {
       });
     })
     .catch((error) => {
+      startupLoadingWindow?.close();
+      startupLoadingWindow = null;
       // A quit during the start, such as `docker stop`, closes the window that is still loading.
       // The quit is already running: an error box would block it, and the shutdown deadline with it.
       // Not `isQuitting`: a Windows session end that another app cancels also sets it, and then no quit runs.

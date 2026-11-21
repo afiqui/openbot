@@ -236,9 +236,7 @@ export class ConversationRuntime {
     const evicted = this.#evictedSnapshots.get(agentId);
     if (!evicted) return undefined;
     const retained = evicted.snapshot.deref();
-    const snapshot =
-      retained ??
-      pageSnapshot(this.#store.database.readConversationPage(agentId, evicted.threadId, { type: "latest" }, 100));
+    const snapshot = retained ?? this.#store.database.readConversationWindow(agentId, evicted.threadId, 100);
     if (retained) this.#restoreEvictedSnapshot(agentId, snapshot);
     else this.#keepSnapshot(agentId, snapshot);
     return this.#snapshots.get(agentId) ?? snapshot;
@@ -588,6 +586,12 @@ export class ConversationRuntime {
     return this.isTaskThread(threadId) || this.channelForThread(threadId) !== null;
   }
 
+  /** Only a newly created replacement for a discarded, unstarted task may reuse its id. */
+  registerRecreatedUnstartedTaskThread(agentId: string, threadId: string): void {
+    this.#forgottenExecutionThreads.delete(threadId);
+    this.registerTaskThread(agentId, threadId);
+  }
+
   registerTaskThread(agentId: string, threadId: string): void {
     if (this.#forgottenExecutionThreads.has(threadId) || this.#store.ownsThread(threadId)) return;
     this.#taskThreads.add(threadId);
@@ -606,7 +610,7 @@ export class ConversationRuntime {
     // then held every message until a restart.
     if (this.#store.ownsThread(threadId)) return;
     if (!this.#executionSnapshots.has(threadId)) {
-      const page = this.#store.database.readConversationPage(agentId, threadId, { type: "latest" }, 100);
+      const page = this.#store.database.readConversationWindow(agentId, threadId, 100);
       this.#setExecutionSnapshot(threadId, {
         agentId,
         threadId: page.threadId,
@@ -632,7 +636,7 @@ export class ConversationRuntime {
     if (execution && publicId) {
       if (execution.agentId !== agentId) throw new Error("Execution thread belongs to another agent.");
       if (!this.#cachedExecutionSnapshots.has(publicId) && execution.messages.length === 0) {
-        const page = this.#store.database.readConversationPage(agentId, publicId, { type: "latest" }, 100);
+        const page = this.#store.database.readConversationWindow(agentId, publicId, 100);
         this.#setExecutionSnapshot(publicId, {
           agentId,
           threadId: page.threadId,
@@ -648,7 +652,7 @@ export class ConversationRuntime {
     if (cached && (!threadId || cached.threadId === threadId)) return cached;
     const agent = this.#store.get(agentId);
     const publicThreadId = agent?.threadId ?? threadId;
-    const page = this.#store.database.readConversationPage(agentId, publicThreadId, { type: "latest" }, 100);
+    const page = this.#store.database.readConversationWindow(agentId, publicThreadId, 100);
     const snapshot: ConversationSnapshot = {
       agentId,
       threadId: page.threadId ?? publicThreadId,
@@ -835,6 +839,17 @@ export class ConversationRuntime {
     this.#publishes += 1;
     this.#emit({ type: "conversation", snapshot: structuredClone(snapshot) });
     return signature;
+  }
+
+  /** Publishes a committed host notice without treating an unflushed provider stream as durable. */
+  publishCommittedMessage(snapshot: ConversationSnapshot, message: ConversationMessage, revision: number): void {
+    const cached = this.#cachedSnapshot(snapshot);
+    const wasCommitted = cached !== undefined && this.#cacheIsCommitted(cached);
+    if (!snapshot.messages.some((current) => current.id === message.id)) snapshot.messages.push(message);
+    snapshot.messages = sortConversationMessages(snapshot.messages);
+    snapshot.revision = Math.max(snapshot.revision, revision);
+    this.publishConversation(snapshot);
+    if (wasCommitted) this.#retainPublishedSnapshot(snapshot);
   }
 
   rememberConversationSignature(snapshot: ConversationSnapshot): void {
@@ -1285,22 +1300,6 @@ function textSize(snapshot: ConversationSnapshot): number {
   let size = snapshot.messages.length;
   for (const message of snapshot.messages) size += message.text.length;
   return size;
-}
-
-function pageSnapshot(page: {
-  agentId: string;
-  threadId: string | null;
-  activeTurnId: string | null;
-  revision: number;
-  messages: ConversationMessage[];
-}): ConversationSnapshot {
-  return {
-    agentId: page.agentId,
-    threadId: page.threadId,
-    activeTurnId: page.activeTurnId,
-    revision: page.revision,
-    messages: page.messages,
-  };
 }
 
 function copySnapshotContents(target: ConversationSnapshot, source: ConversationSnapshot): ConversationSnapshot {

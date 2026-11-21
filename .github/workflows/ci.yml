@@ -207,6 +207,30 @@ jobs:
       - name: Run the browser smoke test
         run: xvfb-run -a bun run test:browser
 
+      - name: Check database startup and mailbox turn lookups
+        run: |
+          git fetch --depth=1 origin tag v0.71.0
+          xvfb-run -a bun run test:database-startup
+          bun run test:mailbox-source-turn
+          bun run test:mailbox-read-index
+          bun run test:conversation-working-window
+          bun run test:routine-flow-discovery
+          bun run test:routine-flow-sweep
+          bun run test:routine-run-read
+          bun run test:claude-history-host
+          bun run test:server-work-policy
+          bun run test:server-work-dispatch
+          bun run test:server-work-capacity
+          bun run test:server-work-service
+          bun run test:server-work-receipt
+          bun run test:server-work-client-receipt
+          bun run test:agent-message-routing-ui
+          bun run test:server-work-backlog
+          bun run test:server-work-queue
+          bun run test:server-work-routing
+          bun run test:jev-work-router
+          bun run test:custom-server-updates
+
       - name: Run the agent browser session E2E
         run: xvfb-run -a bun run test:browser-agent-session
 

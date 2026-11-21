@@ -91,6 +91,7 @@ import {
   teammateRequest,
   textAnswersOnly,
 } from "./routine-quiet-runs";
+import { isServerWorkThread } from "./server-work-identity";
 import { type SkillLoad, skillLoads, skillLoadTokens } from "./skill-loads";
 import {
   endCodexChild,
@@ -2637,7 +2638,11 @@ export class TurnLifecycle {
         }
         // A turn can start with the answers of several teammates. `#relayAgentResult` skips each one
         // that wants no answer, so only a teammate that asked for a result gets one.
-        if (!continuation && !this.#conversation.isExecutionThread(snapshot.threadId) && terminal === "completed") {
+        if (
+          !continuation &&
+          (!this.#conversation.isExecutionThread(snapshot.threadId) || isServerWorkThread(snapshot.threadId)) &&
+          terminal === "completed"
+        ) {
           // A quiet turn's answer is a quiet answer now, so the result is the answer from before it settled.
           const resultText = quiet ? answerText : latestAssistant?.text;
           // A turn with no answer text can still have run tools and made files. The note says so, or
@@ -2649,7 +2654,7 @@ export class TurnLifecycle {
                   redactText(this.#hooks.redactMcp(text)),
                 );
           for (const delivery of deliveries)
-            if (yield* this.#relayAgentResult(agentId, turnId, delivery, deliveries, resultText, noResult))
+            if (yield* this.#relayAgentResult(agentId, turnId, snapshot, delivery, deliveries, resultText, noResult))
               resulted.push(delivery);
         }
         if (resulted.length > 0) keepBounded(this.#lastResults, resultsKey, { turnIds: [turnId], requests: resulted });
@@ -2680,7 +2685,7 @@ export class TurnLifecycle {
         if (last && (running.continues.length === 0 || running.continues.some((id) => last.turnIds.includes(id)))) {
           const kept: DeliveryContext[] = [];
           for (const request of last.requests)
-            if (yield* this.#relayLaterResult(agentId, turnId, request, answerText)) kept.push(request);
+            if (yield* this.#relayLaterResult(agentId, turnId, snapshot, request, answerText)) kept.push(request);
           // This turn can start more background work, whose turn then continues this one.
           if (kept.length > 0)
             this.#lastResults.set(resultsKey, { turnIds: [...last.turnIds, turnId], requests: kept });
@@ -3161,6 +3166,7 @@ export class TurnLifecycle {
     this: TurnLifecycle,
     agentId: string,
     turnId: string,
+    sourceSnapshot: ConversationSnapshot,
     delivery: DeliveryContext,
     turnDeliveries: readonly DeliveryContext[],
     text: string | undefined,
@@ -3169,7 +3175,7 @@ export class TurnLifecycle {
     if (!this.#sendsResult(agentId, turnId, delivery.delivery, turnDeliveries, text)) return false;
     // A turn that ended with no answer still answers, so the agent that asked does not wait for a
     // result that never comes (#6044).
-    yield* this.#sendResult(agentId, turnId, delivery.delivery, text ?? noResult);
+    yield* this.#sendResult(agentId, turnId, sourceSnapshot, delivery.delivery, text ?? noResult);
     return true;
   });
 
@@ -3182,12 +3188,13 @@ export class TurnLifecycle {
     this: TurnLifecycle,
     agentId: string,
     turnId: string,
+    sourceSnapshot: ConversationSnapshot,
     { delivery }: DeliveryContext,
     text: string,
   ) {
     if (delivery.sender.kind !== "agent" || !this.#store.has(delivery.sender.agentId)) return false;
     if (this.#mailbox.hasAgentMessageFromTurnTo(agentId, turnId, delivery.sender.agentId, new Set())) return false;
-    yield* this.#sendResult(agentId, turnId, delivery, text);
+    yield* this.#sendResult(agentId, turnId, sourceSnapshot, delivery, text);
     return true;
   });
 
@@ -3195,6 +3202,8 @@ export class TurnLifecycle {
     this: TurnLifecycle,
     agentId: string,
     turnId: string,
+    /** The answering turn's chat. A result from a server-work side chat names that chat's task. */
+    sourceSnapshot: ConversationSnapshot,
     delivery: QueueDelivery,
     text: string,
   ) {
@@ -3204,6 +3213,10 @@ export class TurnLifecycle {
     // A result for a request from a side thread runs in that thread, as an answer with send_message does.
     const answerTaskId = this.#mailbox.answerTaskId(agentId, messageId, [recipientAgentId]);
     const taskId = answerTaskId && this.#hooks.taskOpen(answerTaskId) ? answerTaskId : undefined;
+    const senderTaskId =
+      sourceSnapshot.threadId && isServerWorkThread(sourceSnapshot.threadId)
+        ? this.#hooks.taskForThread(sourceSnapshot.threadId)
+        : null;
     const receipt = yield* this.#mailbox
       .enqueue({
         sender: { kind: "agent", agentId },
@@ -3211,12 +3224,13 @@ export class TurnLifecycle {
         text,
         replyToMessageId: messageId,
         ...(taskId ? { taskId } : {}),
+        ...(senderTaskId ? { senderTaskId } : {}),
         // The requested result, not a new request: this tells the recipient it owes no acknowledgement for it.
         expectsReply: false,
         idempotencyKey: `${AUTO_RESULT_KEY_PREFIX}${turnId}:${messageId}`,
       })
       .pipe(toTurnOperationFailed);
-    const senderSnapshot = this.#conversation.snapshotToUpdate(agentId);
+    const senderSnapshot = senderTaskId ? sourceSnapshot : this.#conversation.snapshotToUpdate(agentId);
     if (senderSnapshot) {
       this.#mailboxSync.syncMailboxMessages(senderSnapshot);
       this.#conversation.emitConversation(senderSnapshot);

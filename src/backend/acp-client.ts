@@ -735,7 +735,7 @@ export class AcpAgentClient extends EventEmitter<ClientEvents> {
   #probing = false;
   /** Whether the agent's process answered a prompt (`AcpFlavor.refusesUntilRestart`). */
   #promptAnswered = false;
-  readonly #bridge = new LocalMcpBridge();
+  readonly #bridge: LocalMcpBridge;
   /** The stdio relays that the sessions of a directory share, by directory and server name. */
   readonly #sharedRelays = new Map<string, SharedStdioRelay>();
   /**
@@ -853,6 +853,7 @@ export class AcpAgentClient extends EventEmitter<ClientEvents> {
   ) {
     super();
     this.#flavor = options.flavor;
+    this.#bridge = new LocalMcpBridge((server, tool) => this.#flavor.mcpToolMetadata?.(server, tool));
     this.#cli = cli;
     this.#transport = this.#newTransport((error) => {
       this.#stopSubagents();

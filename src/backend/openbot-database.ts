@@ -281,14 +281,27 @@ export class OpenBotDatabase {
     return this.#conversations.conversationHasAfter(threadId, messageId, options);
   }
 
+  /** Bounded internal state without the client page's unloaded-history summary scan. */
+  readConversationWindow(agentId: string, threadId: string | null, limit = 100): ConversationSnapshot {
+    return this.#conversations.readConversationWindow(agentId, threadId, limit);
+  }
+
   readConversationPage(
     agentId: string,
     threadId: string | null,
     anchor: ConversationPageAnchor = { type: "latest" },
     requestedLimit = 50,
     options: ConversationMarkerExclusions = {},
+    latestMaximumMessages = 100,
   ): ConversationPage {
-    return this.#conversations.readConversationPage(agentId, threadId, anchor, requestedLimit, options);
+    return this.#conversations.readConversationPage(
+      agentId,
+      threadId,
+      anchor,
+      requestedLimit,
+      options,
+      latestMaximumMessages,
+    );
   }
 
   supportedConversationCursor(

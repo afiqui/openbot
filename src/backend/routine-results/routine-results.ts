@@ -34,7 +34,9 @@ import { createOpenBotLogger } from "@openbot/logging";
 import { Cause, Context, Effect, Exit, Fiber, Layer, ManagedRuntime, Schema, Scope, Semaphore } from "effect";
 import { isNoUpdateAnswer } from "../agent/routine-quiet-runs";
 import type { MessagingPostFailure } from "../messaging/messaging-threads";
-import type { RoutineResultOutgoing, RoutineResultStore } from "./routine-result-store";
+import type { RoutineFlowDiscovery } from "../routine-flows/routine-flow-discovery";
+import type { RoutineFlowOwnerCursor, RoutineFlowOwnerPage } from "../routine-flows/routine-flow-discovery-protocol";
+import type { RoutineResultOutgoing, RoutineResultPendingRun, RoutineResultStore } from "./routine-result-store";
 
 const logger = createOpenBotLogger("routine-results");
 
@@ -54,6 +56,8 @@ export class RoutineResultError extends Error {}
 
 export interface RoutineResultsDependencies {
   store: RoutineResultStore;
+  /** Process-backed in the application; source fixtures can omit it. */
+  discovery?: Pick<RoutineFlowDiscovery, "resultRuns" | "close">;
   /**
    * The turns of a run's delivery, newest first, with the turns that read its teammates' answers, and
    * whether an answer is still to come. Null when the delivery is gone or started no turn.
@@ -103,6 +107,8 @@ class RoutineResults extends Context.Service<RoutineResults, RoutineResultsShape
         const scope = yield* Scope.Scope;
         const lock = yield* Semaphore.make(1);
         const { store } = dependencies;
+        const discovery = dependencies.discovery;
+        if (discovery) yield* Effect.addFinalizer(() => discovery.close());
         const now = () => (dependencies.now ?? (() => new Date()))();
         /** A sweep running, and whether another was asked for while it ran. */
         let sweeping = false;
@@ -171,16 +177,16 @@ class RoutineResults extends Context.Service<RoutineResults, RoutineResultsShape
         });
 
         /** Keeps the answer of each run that ended since the last sweep. Answers the agents it touched. */
-        const recordAnswers = (since: string, at: string): Set<string> => {
+        const recordAnswers = Effect.fn("RoutineResults.recordAnswers")(function* (since: string, at: string) {
           const changed = new Set<string>();
           const waitedSince = new Date(Date.parse(at) - TEAMMATE_ANSWER_WAIT_MS).toISOString();
           waitEndsAt = null;
-          for (const run of store.runsWithoutDelivery(since)) {
+          const record = (run: RoutineResultPendingRun) => {
             const turns = run.deliveryId ? dependencies.runTurns(run.deliveryId) : null;
             if (turns?.waiting && run.endedAt > waitedSince) {
               const endsAt = new Date(Date.parse(run.endedAt) + TEAMMATE_ANSWER_WAIT_MS).toISOString();
               if (!waitEndsAt || endsAt < waitEndsAt) waitEndsAt = endsAt;
-              continue;
+              return;
             }
             let output: string | null = null;
             for (const turnId of turns?.turnIds ?? []) {
@@ -191,9 +197,23 @@ class RoutineResults extends Context.Service<RoutineResults, RoutineResultsShape
             const answer = output && !isNoUpdateAnswer(output) ? output : null;
             store.createDelivery(run, answer ? resultText(run.routineName, answer) : null, at);
             if (answer) changed.add(run.agentId);
+          };
+          if (discovery) {
+            let after: RoutineFlowOwnerCursor | null = null;
+            do {
+              const page: RoutineFlowOwnerPage = yield* discovery.resultRuns(since, after);
+              for (const runId of page.runIds) {
+                const run = store.runWithoutDelivery(runId, since);
+                if (run) record(run);
+              }
+              after = page.after;
+              yield* Effect.yieldNow;
+            } while (after !== null);
+          } else {
+            for (const run of store.runsWithoutDelivery(since)) record(run);
           }
           return changed;
-        };
+        });
 
         /** Posts one delivery and records what became of it. */
         const send = Effect.fn("RoutineResults.send")(function* (item: RoutineResultOutgoing) {
@@ -278,7 +298,10 @@ class RoutineResults extends Context.Service<RoutineResults, RoutineResultsShape
 
         const sweepOnce = Effect.fn("RoutineResults.sweepOnce")(function* () {
           const at = now();
-          const changed = recordAnswers(new Date(at.getTime() - SWEEP_WINDOW_MS).toISOString(), at.toISOString());
+          const changed = yield* recordAnswers(
+            new Date(at.getTime() - SWEEP_WINDOW_MS).toISOString(),
+            at.toISOString(),
+          );
           for (const item of store.due(at.toISOString())) {
             yield* send(item);
             changed.add(item.agentId);

@@ -525,7 +525,13 @@ function googleRefusedMcpTools(log: string, folder: string): string[] {
   return tools;
 }
 
+// Antigravity can leave tools out of the model request once its MCP schema budget is full.
+// Keep a direct path to teammate tools and the catalog dispatcher within that budget.
+const ANTIGRAVITY_CORE_OPENBOT_TOOLS = new Set(["list_agents", "send_message", "routine_report_failure", "tool_call"]);
+
 export const ANTIGRAVITY_ACP_FLAVOR: AcpFlavor = {
+  mcpToolMetadata: (server, tool) =>
+    server === "openbot" && ANTIGRAVITY_CORE_OPENBOT_TOOLS.has(tool) ? { "antigravity/alwaysLoad": true } : undefined,
   // Antigravity 1.5.6 starts the entry of its own `mcp_config.json` in place of a session server with
   // the same name, and does not start the session server. The user's entry and its tool limits then
   // decide what the agent can call: "tool COMPOSIO_SEARCH_TOOLS is not enabled for server composio"
@@ -540,7 +546,8 @@ export const ANTIGRAVITY_ACP_FLAVOR: AcpFlavor = {
   // Antigravity 1.4.5 declares these built-ins in each request, about 2.4k tokens. OpenBot has its own
   // routines, and a workflow runs agents that OpenBot does not show. Antigravity keeps the filter with
   // the session; a load or resume sends it again, so a session from an earlier release gets it too.
-  sessionMeta: { antigravity: { disabledTools: ["schedule", "run_workflow"] } },
+  // Pin the built-in server at session setup too. Keep user and browser MCP servers lazy.
+  sessionMeta: { antigravity: { disabledTools: ["schedule", "run_workflow"], eagerMcpServers: ["openbot"] } },
   // After an approval, Antigravity runs the edit as a new call (`<sessionId>:<n>`, "Running
   // edit_file") and then fails the approved call with this text. The chat showed a failure beside
   // each approved edit that worked (#6878).

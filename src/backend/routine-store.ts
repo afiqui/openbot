@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { INPUT_LIMITS } from "@openbot/contracts/input-limits";
 import type {
   RoutineFields,
@@ -194,6 +195,8 @@ export interface RoutineHoldWindow {
  * its callers already use.
  */
 export class RoutineStore {
+  #runStatements: { db: DatabaseSync; byHandle: StatementSync; byId: StatementSync } | null = null;
+
   constructor(
     protected readonly database: OpenBotDatabase,
     protected readonly tables: RoutineTables,
@@ -1192,10 +1195,23 @@ export class RoutineStore {
   }
 
   protected runForHandleRow(handleId: string): OwnedRoutineRun | null {
-    const row = this.database.connection
-      .prepare(`SELECT ${this.runColumns} FROM ${this.tables.runTable} WHERE ${this.tables.handleColumn} = ?`)
-      .get(handleId);
+    const row = this.#runStatementsForConnection().byHandle.get(handleId);
     return isDynamicRecord(row) ? this.#run(row) : null;
+  }
+
+  /** Cache SQL compilation only. Each get still reads current rows, including uncommitted changes. */
+  #runStatementsForConnection() {
+    const db = this.database.connection;
+    if (this.#runStatements?.db !== db) {
+      this.#runStatements = {
+        db,
+        byHandle: db.prepare(
+          `SELECT ${this.runColumns} FROM ${this.tables.runTable} WHERE ${this.tables.handleColumn} = ?`,
+        ),
+        byId: db.prepare(`SELECT ${this.runColumns} FROM ${this.tables.runTable} WHERE run_id = ?`),
+      };
+    }
+    return this.#runStatements;
   }
 
   #allActive(): OwnedRoutine[] {
@@ -1347,9 +1363,7 @@ export class RoutineStore {
   }
 
   #requireRun(runId: string): OwnedRoutineRun {
-    const row = this.database.connection
-      .prepare(`SELECT ${this.runColumns} FROM ${this.tables.runTable} WHERE run_id = ?`)
-      .get(runId);
+    const row = this.#runStatementsForConnection().byId.get(runId);
     if (!isDynamicRecord(row)) throw new Error("The routine run no longer exists.");
     return this.#run(row);
   }

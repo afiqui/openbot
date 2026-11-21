@@ -1180,6 +1180,51 @@ describe("OpenBotDatabase", () => {
     database.close();
   });
 
+  it("prunes superseded snapshots and their activity rows by range, also after a restart", async () => {
+    const root = await mkdtemp(join(tmpdir(), "openbot-db-"));
+    roots.push(root);
+    const first = new OpenBotDatabase(root);
+    await runCauseEffect(first.initialize());
+    const agent = testAgent();
+    first.replaceAgents("agents-import", [agent], "agents.imported");
+    const threadId = agent.threadId;
+    if (!threadId) throw new Error("The test agent has no thread.");
+    const snapshot = streamingSnapshot(agent, 3);
+    const activityCount = (database: OpenBotDatabase, eventType: string) =>
+      database.connection
+        .prepare("SELECT COUNT(*) AS count FROM projection_thread_activities WHERE thread_id = ? AND activity_type = ?")
+        .get(threadId, eventType);
+
+    first.persistConversation(snapshot, "turn.started", { turnId: "turn-1" });
+    first.persistConversation(snapshot, "turn.started", { turnId: "turn-1" });
+    expect(snapshotEventCount(first, threadId)).toBe(1);
+    // The superseded snapshot's activity row goes by its key, with no scan of the activity table.
+    expect(activityCount(first, "turn.started")).toMatchObject({ count: 1 });
+    first.close();
+
+    // A new start has no prune position in memory. It starts at the oldest message row, which the last
+    // whole snapshot wrote, so that snapshot and a flush after it still go.
+    const reopened = new OpenBotDatabase(root);
+    await runCauseEffect(reopened.initialize());
+    const streamed = snapshot.messages.at(-1);
+    if (!streamed) throw new Error("The streaming message is missing.");
+    streamed.text = "Streamed after the restart.";
+    reopened.persistStreamingMessage({ snapshot, messageId: streamed.id, eventType: "response.delta-flushed" });
+    streamed.status = "completed";
+    snapshot.activeTurnId = null;
+    reopened.persistConversation(snapshot, "turn.completed", { turnId: "turn-1", status: "completed" });
+
+    expect(snapshotEventCount(reopened, threadId)).toBe(1);
+    expect(streamedMessageEventCount(reopened, threadId)).toBe(0);
+    expect(activityCount(reopened, "turn.started")).toMatchObject({ count: 0 });
+    reopened.connection.prepare("DELETE FROM projection_thread_messages WHERE thread_id = ?").run(threadId);
+    expect(reopened.rebuildThreadProjection(threadId).messages.at(-1)).toMatchObject({
+      text: "Streamed after the restart.",
+      status: "completed",
+    });
+    reopened.close();
+  });
+
   it("falls back to a whole snapshot when the streamed message left the thread", async () => {
     const database = await createDatabase();
     const agent = testAgent();

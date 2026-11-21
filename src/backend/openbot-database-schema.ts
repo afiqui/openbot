@@ -124,7 +124,10 @@ function readAppliedVersions(db: DatabaseSync): number[] {
  * recover by installing a release that knows the version (`src/main/newer-database-recovery.ts`).
  */
 export class NewerDatabaseError extends Error {
-  constructor(databaseVersion: number, supportedVersion: number) {
+  constructor(
+    readonly databaseVersion: number,
+    readonly supportedVersion: number,
+  ) {
     super(`OpenBot database version ${databaseVersion} is newer than this application supports (${supportedVersion}).`);
   }
 }

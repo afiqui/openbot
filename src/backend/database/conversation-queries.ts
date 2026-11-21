@@ -319,12 +319,46 @@ export class ConversationQueries {
     return rows.map((row) => decodeConversationMessageJson(requiredStringColumn(row, "message_json")));
   }
 
+  /** Public pages retain their released history totals and cursors. */
   readConversationPage(
     agentId: string,
     threadId: string | null,
     anchor: ConversationPageAnchor = { type: "latest" },
     requestedLimit = 50,
     options: ConversationMarkerExclusions = {},
+    latestMaximumMessages = PAGE_MESSAGE_LIMIT,
+  ): ConversationPage {
+    return this.#readConversationPage(agentId, threadId, anchor, requestedLimit, options, latestMaximumMessages, true);
+  }
+
+  /** Internal working state needs recent messages, never a count of all unloaded history. */
+  readConversationWindow(agentId: string, threadId: string | null, limit = 100): ConversationSnapshot {
+    const page = this.#readConversationPage(
+      agentId,
+      threadId,
+      { type: "latest" },
+      limit,
+      {},
+      PAGE_MESSAGE_LIMIT,
+      false,
+    );
+    return {
+      agentId: page.agentId,
+      threadId: page.threadId,
+      activeTurnId: page.activeTurnId,
+      revision: page.revision,
+      messages: page.messages,
+    };
+  }
+
+  #readConversationPage(
+    agentId: string,
+    threadId: string | null,
+    anchor: ConversationPageAnchor = { type: "latest" },
+    requestedLimit = 50,
+    options: ConversationMarkerExclusions = {},
+    latestMaximumMessages = PAGE_MESSAGE_LIMIT,
+    includeHistorySummary = true,
   ): ConversationPage {
     if (!threadId) {
       return {
@@ -337,7 +371,8 @@ export class ConversationQueries {
         pageInfo: { hasOlder: false, olderCursor: null },
       };
     }
-    const limit = pageLimit(requestedLimit);
+    const maximum = anchor.type === "latest" ? pageLimit(latestMaximumMessages) : PAGE_MESSAGE_LIMIT;
+    const limit = Math.min(pageLimit(requestedLimit), maximum);
     const thread = decodeConversationThreadRow(
       this.#core.connection
         .prepare(
@@ -346,7 +381,7 @@ export class ConversationQueries {
         )
         .get(threadId, agentId),
     );
-    const rows = this.#conversationPageRows(threadId, anchor, limit, options);
+    const rows = this.#conversationPageRows(threadId, anchor, limit, options, maximum);
     // The rows come in the shown order, which a cursor follows. A page of a split turn is not sorted
     // again: it does not hold the turn's first input, which the shared order needs to find a steer.
     const messages = rows.map((row) => decodeConversationMessageJson(requiredStringColumn(row, "message_json")));
@@ -358,7 +393,7 @@ export class ConversationQueries {
     }
     const referenceIds = [...referenceIdSet];
     const references: Record<string, ConversationMessage> = {};
-    if (referenceIds.length > 0) {
+    if (includeHistorySummary && referenceIds.length > 0) {
       const placeholders = referenceIds.map(() => "?").join(", ");
       const referenceRows = databaseRows(
         this.#core.connection
@@ -376,9 +411,10 @@ export class ConversationQueries {
       }
     }
     const first = rows[0];
-    const older = first
-      ? this.#conversationRowsBefore(threadId, conversationRowCursor(first), options)
-      : { count: 0, oldestAt: null };
+    const older =
+      first && includeHistorySummary
+        ? this.#conversationRowsBefore(threadId, conversationRowCursor(first), options)
+        : { count: 0, oldestAt: null };
     const hasOlder = older.count > 0;
     return {
       agentId,
@@ -605,8 +641,9 @@ export class ConversationQueries {
     anchor: ConversationPageAnchor,
     limit: number,
     exclusions: ConversationMarkerExclusions,
+    latestMaximumMessages: number,
   ): DynamicRecord[] {
-    const rows = this.#conversationPageKeys(threadId, anchor, limit, exclusions);
+    const rows = this.#conversationPageKeys(threadId, anchor, limit, exclusions, latestMaximumMessages);
     if (rows.length === 0) return [];
     // The order index carries only the keys. The page's messages are read after it is chosen.
     const json = new Map(
@@ -627,6 +664,7 @@ export class ConversationQueries {
     anchor: ConversationPageAnchor,
     limit: number,
     exclusions: ConversationMarkerExclusions,
+    latestMaximumMessages: number,
   ): DynamicRecord[] {
     const routineFilter = conversationMarkerSqlFilter(exclusions);
     if (anchor.type === "latest") {
@@ -638,9 +676,9 @@ export class ConversationQueries {
              WHERE 1 = 1 ${routineFilter}
              ORDER BY ${ORDER_KEY_DESC} LIMIT ?`,
           )
-          .all(threadId, PAGE_MESSAGE_LIMIT + 1),
+          .all(threadId, latestMaximumMessages + 1),
       );
-      return wholeGroups(rows, limit, PAGE_MESSAGE_LIMIT).reverse();
+      return wholeGroups(rows, limit, latestMaximumMessages).reverse();
     }
     if (anchor.type === "before") {
       const cursor = this.#pageCursor(threadId, anchor.cursor);

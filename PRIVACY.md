@@ -116,6 +116,13 @@ that first visit when the account has one.
 
 ## AI conversation context
 
+In the custom host, selecting Thread for incoming messages enables Jev through Experiential Labs routing. The host
+sends the incoming text, permitted work titles and a bounded main-chat subject to
+`https://api.experientiallabs.ai/v1/systemone`, after masking known secrets. It sends no work transcript,
+local task ID, account data or analytics event. The receiving agent's permitted Vault
+`EXPERIENTIAL_API_KEY`, or the server environment key, authenticates this request. Queue and Steer make
+no Jev request. This custom choice is stored only on the host and is off until selected.
+
 When a provider session is replaced, OpenBot sends a bounded excerpt of the current conversation
 to the selected provider. The agent can request older messages from that same conversation through
 local history tools. Requested text and selected saved work steps are then sent to that provider.
@@ -2322,3 +2329,7 @@ Registry install records remain on the host, separate from conversations and cre
 An authorized remote administrator can install, update, cancel, or remove a registry runtime on
 the host through the encrypted Team connection. Removal does not delete agent configuration,
 credentials, or conversations. The existing cloud service does not store those files.
+
+The custom host keeps at most 200 local Jev routing observations with fixed outcome/reason codes,
+agent IDs, elapsed time, candidate count, HTTP status and timestamps. These observations contain no
+message text, work titles, task IDs, credentials or provider response bodies and are not sent out.

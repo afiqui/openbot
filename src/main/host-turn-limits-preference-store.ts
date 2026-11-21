@@ -10,6 +10,11 @@ import { isDynamicRecord } from "@openbot/contracts/runtime-values";
 import { Effect } from "effect";
 import { type PreferenceFileFailure, PreferenceStore } from "./preference-file";
 
+export interface HostTurnLimitsOverride {
+  read(): HostTurnLimitsInput | null;
+  set(input: HostTurnLimitsInput): Effect.Effect<void, PreferenceFileFailure>;
+}
+
 /**
  * The turn limits of this host, which an owner or admin sets in Server Settings. Null keeps each one
  * at its default, and a total of "unlimited" sets no limit: the total follows the memory of a server
@@ -23,10 +28,11 @@ import { type PreferenceFileFailure, PreferenceStore } from "./preference-file";
 export class HostTurnLimitsPreferenceStore {
   readonly #store: PreferenceStore<HostTurnLimitsInput>;
   readonly #automaticTurnLimit: () => number | null;
+  readonly #override: HostTurnLimitsOverride | undefined;
   readonly #listeners = new Set<(limits: HostTurnLimits) => void>();
 
   /** `automaticTurnLimit`: the limit that the memory of this computer sets, or null for no limit. */
-  constructor(path: string, automaticTurnLimit: () => number | null) {
+  constructor(path: string, automaticTurnLimit: () => number | null, override?: HostTurnLimitsOverride) {
     this.#store = new PreferenceStore<HostTurnLimitsInput>({
       path,
       defaultValue: { turnLimit: null, agentTaskLimit: null },
@@ -39,6 +45,7 @@ export class HostTurnLimitsPreferenceStore {
           : null,
     });
     this.#automaticTurnLimit = automaticTurnLimit;
+    this.#override = override;
   }
 
   load(): Effect.Effect<void, PreferenceFileFailure> {
@@ -46,7 +53,7 @@ export class HostTurnLimitsPreferenceStore {
   }
 
   get(): HostTurnLimits {
-    const { turnLimit, agentTaskLimit } = this.#store.get();
+    const { turnLimit, agentTaskLimit } = this.#override?.read() ?? this.#store.get();
     return {
       turnLimit,
       agentTaskLimit,
@@ -60,24 +67,26 @@ export class HostTurnLimitsPreferenceStore {
    * then asks the memory.
    */
   turnLimit(): HostTurnLimit | null {
-    return this.#store.get().turnLimit;
+    return this.get().turnLimit;
   }
 
   /** The task limit of an agent that has no limit of its own. */
   agentTaskLimit(): number {
-    return this.#store.get().agentTaskLimit ?? AGENT_TASK_LIMIT_DEFAULT;
+    return this.get().agentTaskLimit ?? AGENT_TASK_LIMIT_DEFAULT;
   }
 
   /** The caller reads the input with `parseHostTurnLimitsInput` first. */
-  readonly set = Effect.fn("HostTurnLimitsPreference.set")(({ turnLimit, agentTaskLimit }: HostTurnLimitsInput) =>
-    this.#store.set({ turnLimit, agentTaskLimit }).pipe(
+  readonly set = Effect.fn("HostTurnLimitsPreference.set")((input: HostTurnLimitsInput) => {
+    const override = this.#override;
+    const save = override && override.read() !== null ? override.set(input) : this.#store.set(input);
+    return save.pipe(
       Effect.map(() => {
         const saved = this.get();
         for (const listener of this.#listeners) listener(saved);
         return saved;
       }),
-    ),
-  );
+    );
+  });
 
   /** Called after each save, so the backend starts the turns that a higher limit lets start. */
   onChange(listener: (limits: HostTurnLimits) => void): () => void {

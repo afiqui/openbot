@@ -631,6 +631,11 @@ the phone read the profiles again on `browser-profiles-changed` (`browser-profil
 
 ## Agent threads
 
+This custom Windows host has an opt-in Queue/Steer/Thread selector. Thread routes new requests
+through a bounded Jev through Experiential Labs decision before main-chat enqueue. Replies keep their routes and
+official host limits remain authoritative. See [custom message routing](../custom-message-routing.md)
+for local configuration, scoped work IDs, retries and compatibility with existing clients.
+
 A side thread (in code and on the wire still a **task**) is a separate execution thread of one agent.
 The agent keeps one identity, workspace and provider settings; each side thread has its own provider
 thread, conversation, queue, progress and result. The agent's own chat is its main thread and has no

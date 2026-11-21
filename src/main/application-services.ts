@@ -1,4 +1,5 @@
 import { isManagedRuntimeProvider, type ManagedProviderId } from "@openbot/contracts/agent-providers";
+import { INPUT_LIMITS } from "@openbot/contracts/input-limits";
 import { ANALYTICS_GENERATIONS, openPanelTransport, ReportQueue } from "@openbot/telemetry";
 import { fileReportStorage } from "@openbot/telemetry/node";
 import { makeWASocket } from "@openbot/whatsapp/baileys";
@@ -11,6 +12,7 @@ import { AgentApiKeys } from "../backend/agent-api-keys";
 import { AgentDatabaseSupervisor } from "../backend/agent-data/agent-database-supervisor";
 import { AgentTables } from "../backend/agent-data/agent-tables";
 import { AgentRoutineStore } from "../backend/agent-routine-store";
+import { ClaudeHistorySupervisor } from "../backend/claude-history-supervisor";
 import { type CrmHandle, createCrm } from "../backend/crm/crm";
 import { CrmError } from "../backend/crm/crm-handle";
 import { stripeSource } from "../backend/crm/crm-stripe";
@@ -56,7 +58,9 @@ import {
   browserProxyConnection,
   createBrowserProfileService,
 } from "./browser-profile-service";
+import { spawnClaudeHistoryHost } from "./claude-history-host-process";
 import { createCrmPreferenceStore, crmSettingsStore } from "./crm-preference-store";
+import { prepareApplicationDatabase } from "./database-startup-process";
 import { feedbackFacts, feedbackSender } from "./feedback";
 import { HostReleaseService, readInstallationMode } from "./host-release-service";
 import {
@@ -75,6 +79,7 @@ import { MAC_PERMISSION_URLS } from "./mac-permission-urls";
 import { PushNotificationStore } from "./push-notification-store";
 import { DESKTOP_USE_MS } from "./push-notifications";
 import { RemoteWorkflowError, toRemoteWorkflowError } from "./remote-service-effects";
+import { createRoutineFlowDiscovery } from "./routine-flow-discovery-process";
 import { sizeWorkflowPicture } from "./workflow-picture-size";
 /**
  * The composition root. Every long-lived service the desktop app owns is built here, in one
@@ -121,6 +126,7 @@ import type {
 } from "@openbot/contracts/ipc";
 import {
   agentBrowserProfile,
+  agentTaskLimit,
   type ChannelCommand,
   DEFAULT_APP_LANGUAGE,
   DEFAULT_DYNAMIC_ISLAND_PREFERENCE,
@@ -158,8 +164,10 @@ import {
   webContents,
 } from "electron";
 import { pasteCodeLoginSupported } from "../backend/agent/cli-code-login";
+import { JevWorkRouter } from "../backend/agent/jev-work-router";
 import { toMcpGatewayFailed } from "../backend/agent/mcp-gateway";
 import { ProviderAccountStore } from "../backend/agent/provider-account-store";
+import { SERVER_WORK_POLICY_FILE } from "../backend/agent/server-work-policy";
 import { AgentMemoryStore } from "../backend/agent-memory-store";
 import { AgentLifecycleFailed, AgentService } from "../backend/agent-service";
 import { AgentStore } from "../backend/agent-store";
@@ -258,8 +266,17 @@ import {
 } from "./cua-driver-runtime";
 import { type CustomAgentChanges, createCustomAgentChanges } from "./custom-agent-changes";
 import { CUSTOM_AGENTS_FILE, CustomAgentStore } from "./custom-agent-store";
+import {
+  CUSTOM_MESSAGE_ROUTING_FILE,
+  CustomMessageRoutingPreferenceStore,
+} from "./custom-message-routing-preference-store";
 import { type CustomProviderChanges, createCustomProviderChanges } from "./custom-provider-changes";
 import { CustomProviderStore } from "./custom-provider-store";
+import { getCustomServerBuild } from "./custom-server-build";
+import {
+  CUSTOM_THREAD_ROUTING_STATUS_FILE,
+  CustomThreadRoutingStatusStore,
+} from "./custom-thread-routing-status-store";
 import { MCP_OAUTH_REDIRECT_URL } from "./deep-link-router";
 import { desktopShowsAgentEvent } from "./desktop-notifications";
 import { shouldAutoStartHost } from "./development-profile";
@@ -431,6 +448,7 @@ import { ServerMode, type ServerModeEnvironment } from "./server-mode";
 import { ServerPersonalityPreferenceStore } from "./server-personality-preference-store";
 import { ServerSetupPage } from "./server-setup-page";
 import { SERVER_TIMEZONE_PREFERENCE_FILE, ServerTimezonePreferenceStore } from "./server-timezone-preference-store";
+import { ServerWorkPolicyStore } from "./server-work-policy-store";
 import {
   configureApplicationProtocol,
   configureAttachmentProtocol,
@@ -579,6 +597,7 @@ const TEARDOWN_ORDER = {
   // First, so a process that the teardown ends does not count as a crash.
   resourceMonitor: 9,
   startupTiming: 9.5,
+  databasePreparation: 9.75,
   // Before the updater and the requested update that it drives.
   requiredUpdate: 9.8,
   updater: 10,
@@ -646,6 +665,10 @@ const TEARDOWN_ORDER = {
   automation: 108,
   storageUsage: 109,
   service: 110,
+  // After provider consumers stop, before diagnostic buffers flush.
+  claudeHistory: 110.1,
+  // After the agent service: no routing decision can add another observation during its flush.
+  customThreadRoutingStatus: 110.25,
   // After the agent service, which stops the provider processes and with them each `cua-driver mcp`
   // proxy. A turn that starts while the service stops still finds the daemon (#6494).
   cuaDriver: 110.5,
@@ -776,6 +799,7 @@ export interface ApplicationServices {
   interfaceSize: InterfaceSizeService;
   notificationPreference: NotificationPreferenceStore;
   busyMessageMode: BusyMessageModePreferenceStore;
+  customMessageRouting: CustomMessageRoutingPreferenceStore | null;
   agentDefaults: AgentDefaultsPreferenceStore;
   agentMemoryLimit: AgentMemoryLimitSetting;
   memoryReview: MemoryReviewPreferenceStore;
@@ -1325,6 +1349,15 @@ export async function createApplicationServices({
     join(app.getPath("userData"), AGENT_DEFAULTS_PREFERENCE_FILE),
   );
   await runCauseEffect(agentDefaults.load());
+  // Complete migrations and integrity checks off the main loop. The child closes
+  // its SQLite connection before the normal store can open the same database.
+  performance.mark("openbot:database-preparation-start");
+  const databasePreparation = Effect.runFork(prepareApplicationDatabase(app.getPath("userData")));
+  teardown.push(TEARDOWN_ORDER.databasePreparation, "database preparation", () =>
+    Effect.runPromise(Fiber.interrupt(databasePreparation)),
+  );
+  await runCauseEffect(Fiber.join(databasePreparation));
+  performance.mark("openbot:database-preparation-end");
   const store = new AgentStore(
     app.getPath("userData"),
     homedir(),
@@ -1584,6 +1617,16 @@ export async function createApplicationServices({
     join(app.getPath("userData"), SERVER_TIMEZONE_PREFERENCE_FILE),
     systemTimezone,
   );
+  const serverWorkPolicy = getCustomServerBuild()
+    ? new ServerWorkPolicyStore(join(app.getPath("userData"), SERVER_WORK_POLICY_FILE))
+    : null;
+  const customMessageRouting = getCustomServerBuild()
+    ? new CustomMessageRoutingPreferenceStore({
+        path: join(app.getPath("userData"), CUSTOM_MESSAGE_ROUTING_FILE),
+        legacyDefault: () => busyMessageMode.get().mode,
+        agents: () => store.list(),
+      })
+    : null;
   const hostTurnLimits = new HostTurnLimitsPreferenceStore(
     join(app.getPath("userData"), HOST_TURN_LIMITS_PREFERENCE_FILE),
     () => hostMemory?.turnLimit() ?? null,
@@ -1642,6 +1685,8 @@ export async function createApplicationServices({
       mcpServerOwners.load(),
       serverTimezone.load(),
       hostTurnLimits.load(),
+      serverWorkPolicy?.load() ?? Effect.void,
+      customMessageRouting?.load() ?? Effect.void,
       serverPersonality.load(),
       promptCacheTtl.load(),
       claudeUserSetup.load(),
@@ -2275,6 +2320,24 @@ export async function createApplicationServices({
   });
   /** The plan storage of a hosted server, set after its sign-in. The agent instructions name it. */
   let hostedStorageGb: number | null = null;
+  const customThreadRoutingStatus = customMessageRouting
+    ? new CustomThreadRoutingStatusStore(join(app.getPath("userData"), CUSTOM_THREAD_ROUTING_STATUS_FILE))
+    : null;
+  if (customThreadRoutingStatus) {
+    teardown.push(TEARDOWN_ORDER.customThreadRoutingStatus, "thread routing diagnostics", () =>
+      Effect.runPromise(customThreadRoutingStatus.dispose()),
+    );
+    await Effect.runPromise(customThreadRoutingStatus.start());
+  }
+  const jevWorkRouter = new JevWorkRouter({
+    apiKey: (agentId) =>
+      vault.items.apiKeys(agentId).find((key) => key.name === "EXPERIENTIAL_API_KEY")?.value ??
+      process.env.EXPERIENTIAL_API_KEY ??
+      null,
+    observe: (event) => customThreadRoutingStatus?.record(event).pipe(Effect.ignore) ?? Effect.void,
+  });
+  const claudeHistory = new ClaudeHistorySupervisor({ spawnHost: spawnClaudeHistoryHost });
+  teardown.push(TEARDOWN_ORDER.claudeHistory, "Claude history readers", () => Effect.runPromise(claudeHistory.close()));
   const service: AgentService = new AgentService({
     store,
     mailbox,
@@ -2350,6 +2413,33 @@ export async function createApplicationServices({
         }),
     hostMemory,
     hostTurnLimits,
+    ...(customMessageRouting
+      ? {
+          messageRouting: {
+            mode: (agentId: string) => customMessageRouting.mode(agentId),
+            decide: (input: import("../backend/agent/server-work-routing").ServerWorkRouteDecisionInput) =>
+              jevWorkRouter.decide(input),
+            legacyAgentChanged: (agentId: string) => customMessageRouting.followLegacyAgent(agentId),
+          },
+          serverWorkPolicy: {
+            policy: (agentId: string) => {
+              if (customMessageRouting.mode(agentId) !== "thread") return null;
+              const agent = store.list().find((item) => item.id === agentId);
+              if (!agent) return null;
+              const configured = serverWorkPolicy?.get();
+              return {
+                maxConcurrentTasks: agentTaskLimit(agent, hostTurnLimits.agentTaskLimit()),
+                maxUnfinishedTasks:
+                  configured?.agents[agentId]?.maxUnfinishedTasks ??
+                  configured?.maxUnfinishedTasks ??
+                  INPUT_LIMITS.agentTasks,
+                dispatchMode: "new-thread" as const,
+              };
+            },
+            turnLimit: () => null,
+          },
+        }
+      : {}),
     hostedStorageGb: () => hostedStorageGb,
     agentCursorDrawn: drawsComputerUseHighlight,
     // An agent display of its own is X11, where the driver records video.
@@ -2396,6 +2486,7 @@ export async function createApplicationServices({
     // built-in default.
     developmentDefaults: appVariant === "dev",
     credentials: {
+      claudeHistoryReader: claudeHistory.reader,
       apiKey: (provider) => providerCredentials.get(provider),
       accountKeys: {
         get: (provider, accountId) => providerCredentials.accountKey(provider, accountId),
@@ -2538,6 +2629,8 @@ export async function createApplicationServices({
     latestTurnAnswer(store.database.readTurnAssistantMessages(agentId, turnId), turnId)?.text ?? null;
   // Listens only while an agent allows local scripts; see `AutomationServer`.
   const automation = new AutomationServer({
+    listQueuedWork: (agentId) => service.listQueuedWork(agentId),
+    dispatchQueuedWork: (agentId, input) => service.dispatchQueuedWork({ agentId, ...input }),
     root: store.automationRoot,
     listAgents: () => service.listAgents(),
     agentDefaults: () => agentDefaults.get(),
@@ -2578,6 +2671,7 @@ export async function createApplicationServices({
   const routineFlowRuntime = await Effect.runPromise(
     createRoutineFlows({
       store: new RoutineFlowStore({ database: store.database }),
+      discovery: createRoutineFlowDiscovery(store.database.userDataPath),
       routines: routineFlowRoutines(new AgentRoutineStore(store.database)),
       delivery: (deliveryId) => {
         const found = mailbox.getDelivery(deliveryId)?.delivery;
@@ -2788,6 +2882,7 @@ export async function createApplicationServices({
   const routineResultRuntime = await Effect.runPromise(
     createRoutineResults({
       store: new RoutineResultStore(store.database),
+      discovery: createRoutineFlowDiscovery(store.database.userDataPath, "result"),
       runTurns: (deliveryId) => mailbox.routineRunTurns(deliveryId),
       turnAnswer,
       connection: (connectionId) => {
@@ -3181,7 +3276,12 @@ export async function createApplicationServices({
   );
   const agentAdminSettings = createAgentAdminSettings({ agents: service, approvalAutomation });
   const agentHostSettings = createAgentHostSettings({ agents: service, busyMessageMode, agentDefaults });
-  const agentDefaultsSettings = createAgentDefaultsSettings({ agents: service, agentDefaults, busyMessageMode });
+  const agentDefaultsSettings = createAgentDefaultsSettings({
+    agents: service,
+    agentDefaults,
+    busyMessageMode,
+    legacyDefaultChanged: () => customMessageRouting?.followLegacyDefault() ?? Effect.void,
+  });
   const agentFolders = createAgentFolders({ service, userDataPath: app.getPath("userData") });
   const agentInstructions = createAgentInstructionsFiles(service);
   const browserProfiles = createBrowserProfileService({
@@ -3383,7 +3483,11 @@ export async function createApplicationServices({
     serverPreferences: {
       timezone: { get: () => serverTimezone.get().timezone, set: (timezone) => serverTimezone.set(timezone) },
       personality: { get: () => serverPersonality.get(), set: (personality) => serverPersonality.set(personality) },
-      busyMessageMode: { get: () => busyMessageMode.get(), set: (mode) => busyMessageMode.set(mode) },
+      busyMessageMode: {
+        get: () => busyMessageMode.get(),
+        set: (mode) =>
+          busyMessageMode.set(mode).pipe(Effect.tap(() => customMessageRouting?.followLegacyDefault() ?? Effect.void)),
+      },
       agentDefaults: {
         get: () => agentDefaults.get(),
         set: (defaults) => {
@@ -4828,6 +4932,7 @@ export async function createApplicationServices({
     interfaceSize,
     notificationPreference,
     busyMessageMode,
+    customMessageRouting,
     agentDefaults,
     agentMemoryLimit: agentMemoryLimitSetting,
     memoryReview,

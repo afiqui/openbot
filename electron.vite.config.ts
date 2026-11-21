@@ -16,6 +16,15 @@ const devWatch = { exclude: ["**/node_modules/**"] };
 
 export default defineConfig({
   main: {
+    define: {
+      __OPENBOT_CUSTOM_SERVER_BUILD__: JSON.stringify({
+        format: 1,
+        buildId: "server-work-073-sync-prune-20261119",
+        upstreamCommit: "3d9e594836184d54deb9df3160f4e9afe25d4fc4",
+        upstreamVersion: "0.73.0",
+        builtAt: new Date().toISOString(),
+      }),
+    },
     // Workspace sources ship as TypeScript and must be bundled for the packaged app.
     plugins: [
       externalizeDepsPlugin({
@@ -45,6 +54,9 @@ export default defineConfig({
           // The database host is its own process. Only node:* and the installed Effect package
           // are runtime imports; the unpacked host must not load the main process bundle.
           "agent-database-host": resolve("src/backend/agent-data/agent-database-host.ts"),
+          "database-startup-host": resolve("src/backend/database/database-startup-host.ts"),
+          "routine-flow-discovery-host": resolve("src/backend/routine-flows/routine-flow-discovery-host.ts"),
+          "claude-history-host": resolve("src/backend/claude-history-host.ts"),
           // The voice hosts are their own processes too. They import only node:* and load the
           // sherpa-onnx addon by path.
           "voice-transcription-host": resolve("src/main/voice-transcription-host.ts"),

@@ -293,6 +293,7 @@ import {
   decodeCrmPaymentPage,
   decodeCrmSettings,
 } from "./crm-decoding";
+import { decodeLocalCustomMessageRouting } from "./custom-message-routing-decoding";
 import {
   decodeDynamicIslandAction,
   decodeDynamicIslandGeometry,
@@ -787,6 +788,8 @@ const openbotApi: OpenBotDesktopApi = {
     getApprovalAutomation: decodeApprovalAutomationPreference,
     approvalAutomation: decodeApprovalAutomationPreference,
     getBusyMessageModePreference: decodeBusyMessageModePreference,
+    getCustomMessageRouting: decodeLocalCustomMessageRouting,
+    setCustomMessageRouting: decodeLocalCustomMessageRouting,
     getAgentDefaults: decodeAgentDefaults,
     getAgentMemoryLimitPreference: decodeAgentMemoryLimitPreference,
     agentMemoryLimitPreference: decodeAgentMemoryLimitPreference,

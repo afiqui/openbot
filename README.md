@@ -1,5 +1,10 @@
 # OpenBot
 
+This checkout includes opt-in [Queue/Steer/Thread routing](docs/custom-message-routing.md) and the
+existing Windows startup changes. The custom host configures Thread in Server Settings > Agents.
+Existing remote desktop and mobile apps keep their released interfaces.
+See [custom server maintenance](docs/custom-server-maintenance.md) before an upstream sync or install.
+
 [![CI](https://github.com/nightly-labs/openbot/actions/workflows/ci.yml/badge.svg)](https://github.com/nightly-labs/openbot/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-PolyForm_Noncommercial_1.0.0-blue.svg)](LICENSE)
 

@@ -178,6 +178,11 @@ export class LocalMcpBridge {
   readonly #routes = new Map<string, BridgeRoute>();
   /** The token of each shared route, by directory and server name. */
   readonly #shared = new Map<string, string>();
+  readonly #toolMetadata: ((server: string, tool: string) => Tool["_meta"]) | undefined;
+
+  constructor(toolMetadata?: (server: string, tool: string) => Tool["_meta"]) {
+    this.#toolMetadata = toolMetadata;
+  }
 
   /**
    * `directory` is set for an agent that keeps one MCP server of each name for a directory, not for
@@ -401,6 +406,7 @@ export class LocalMcpBridge {
           name: tool.name,
           description: tool.description,
           inputSchema: tool.inputSchema,
+          _meta: this.#toolMetadata?.(route.namespace.name, tool.name),
         })),
       };
     });

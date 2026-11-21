@@ -18,6 +18,7 @@ import { Cause, Deferred, Effect, Fiber, Result, Schema, Scope, Semaphore } from
 import type { ProgressInfo, UpdateInfo } from "electron-updater";
 import type { HostUpdateState } from "../../packages/contracts/src/host-manager";
 import { causeHelpers } from "../backend/effect-boundary";
+import { stockUpdatesAllowed } from "./custom-server-build";
 import { writeUpdateHandover, writeUpdateInstallRecord } from "./update-install-guard";
 import type { OpenBotSiblingInstance, SiblingScanFailed } from "./update-sibling-instances";
 
@@ -86,6 +87,7 @@ export function createDisabledUpdateAdapter(): UpdateAdapter {
 
 /** electron-updater's updater, or `null` when the module does not load. */
 export async function loadElectronUpdater(): Promise<UpdateAdapter | null> {
+  if (!stockUpdatesAllowed()) return null;
   try {
     const updaterModule = await import("electron-updater");
     const adapter = updaterModule.autoUpdater ?? updaterModule.default?.autoUpdater ?? updaterModule.default;
@@ -280,10 +282,12 @@ export class UpdateService extends EventEmitter<UpdateServiceEvents> {
 
   constructor(updater: UpdateAdapter, options: UpdateServiceOptions) {
     super();
+    const enabled = options.enabled && stockUpdatesAllowed();
     this.#updater = updater;
     this.#autoDownload = options.autoDownload;
     this.#options = {
       ...options,
+      enabled,
       platform: options.platform ?? process.platform,
       initialCheckDelayMs: options.initialCheckDelayMs ?? 12_000,
       checkIntervalMs: options.checkIntervalMs ?? DEFAULT_CHECK_INTERVAL,
@@ -296,12 +300,12 @@ export class UpdateService extends EventEmitter<UpdateServiceEvents> {
     if (options.notInstalledVersion)
       logger.warn(`The last update restart did not install OpenBot ${options.notInstalledVersion}.`);
     this.#status = {
-      phase: options.enabled ? "idle" : "unsupported",
+      phase: enabled ? "idle" : "unsupported",
       currentVersion: options.currentVersion,
       availableVersion: null,
       progress: null,
       checkedAt: null,
-      message: options.enabled ? null : unsupportedMessage(),
+      message: enabled ? null : unsupportedMessage(),
       errorCode: null,
     };
     this.on("diagnostic", (event) => {
@@ -858,7 +862,7 @@ export class UpdateService extends EventEmitter<UpdateServiceEvents> {
    * second time, concurrently with the first.
    */
   #canInstall(): boolean {
-    return this.#downloadedVersion !== null && this.#status.phase === "ready";
+    return this.#options.enabled && this.#downloadedVersion !== null && this.#status.phase === "ready";
   }
 
   /**
