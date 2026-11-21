@@ -1,7 +1,6 @@
 import { defineMessages } from "../../../message";
 
 export const messages = defineMessages("error.provider", {
-  // Provider, provider runtime and custom endpoint errors.
   "error.provider.mcpConfig":
     "OpenBot could not register MCP servers in the Codex configuration. Check that your Codex config.toml is valid and writable, then restart OpenBot.",
   "error.provider.computerUseConfig":
@@ -18,6 +17,8 @@ export const messages = defineMessages("error.provider", {
     "{provider} says that your plan is used up. Choose another model, or upgrade your {provider} plan.",
   "error.provider.acpMcpNotLoaded":
     "{provider} did not load OpenBot's tools, so this agent cannot use them or reach its teammates. A {provider} team policy can block local MCP servers. Ask your team admin to allow them, then try again.",
+  "error.provider.acpToolsNotLoaded":
+    "{provider} ran this message without OpenBot's tools, so the agent could not reach its teammates, use the browser or attach files. Try again.",
   "error.provider.acpOwnMcpServerFailed":
     "{provider} could not start the MCP server {name}, so the reply stopped. This server is in your own {provider} settings, not in OpenBot. Remove the server there or repair it, then start a new chat.",
   "error.provider.endpointsReadOnly":
@@ -227,6 +228,8 @@ export const messages = defineMessages("error.provider", {
     'The endpoint "{provider}" refused the request. Its API key or headers can be wrong, or its account cannot use this model. Check them in Server settings → Providers, or choose another model. Then try again.',
   "error.provider.customEndpointKeyMissing":
     'The endpoint "{provider}" needs an API key. Add the key in Server settings → Providers, then try again.',
+  "error.provider.customEndpointEffortRefused":
+    'The endpoint "{provider}" refused the reasoning effort of this model. In Server settings → Providers, edit "{provider}". Under Efforts, keep only the efforts that this model accepts, or select No reasoning. Then try again.',
   "error.provider.opencodeKeyExpired":
     "Your OpenCode API key expired. Create a new key in OpenCode Console, paste it in the OpenCode settings, then try again.",
   "error.provider.opencodeKeyRefused":
@@ -255,6 +258,10 @@ export const messages = defineMessages("error.provider", {
     "This model is not available to you. Select a different model for this agent.\n{detail}",
   "error.provider.opencodeIncompleteReply":
     "The model's reply was cut off or was not valid. Send your message again, or choose another model.\n{detail}",
+  "error.provider.opencodeOutputLimit":
+    "The model's reply was longer than its output limit three times, so the turn stopped. Choose a lower effort or another model, then send your message again.",
+  "error.provider.opencodeOutputLimitEndpoint":
+    "The model's reply was longer than its output limit three times, so the turn stopped. In Settings, open Custom provider, click Edit on this endpoint, and set a larger Max output for this model. Or choose a lower effort or another model.",
   "error.provider.opencodeReasoningOverlap":
     "OpenCode could not read the reasoning of this model at this effort. Select a lower effort or another model, then send your message again.",
   "error.provider.opencodeModelNotServed":
@@ -279,6 +286,8 @@ export const messages = defineMessages("error.provider", {
   "error.provider.noAnswerAfterSteps":
     "{provider} did some steps, then ended the turn with no answer. Ask the agent what it did before you send the same request again.",
   "error.provider.acpRefusedNoReason": "{provider} stopped without an answer. Send the message again.",
+  "error.provider.channelNoAnswer":
+    "{provider} ended the turn with no answer. In the channel, click Continue to run the task again, or Reassign to give it to another member.",
   "error.provider.chatgptPageFailed": "OpenBot could not open the ChatGPT connection page.",
   "error.provider.noneReady": "No agent provider is ready.",
   "error.provider.claudeTurnActive": "Wait for the active Claude turn before refreshing its context.",
@@ -313,6 +322,8 @@ export const messages = defineMessages("error.provider", {
     "Gemini refused this request and did not give the cause. An item in the chat history can cause this, such as an image that the agent opened. OpenBot started a new Gemini session with the chat history. Try again. If the error continues, choose another model.",
   "error.provider.antigravityHistoryUnreadable":
     "Gemini could not read the saved history of this chat. OpenBot started a new Gemini session with the chat history. Send your message again.",
+  "error.provider.acpTurnStuck":
+    "{provider} did not end its earlier turn, so it did not accept this message. OpenBot started a new {provider} session with the chat history. Send your message again.",
   "error.provider.antigravityLocationUnsupported":
     "Google does not let Gemini work from the network location of the computer that runs this agent. Use Gemini on another computer, or choose another provider for this agent.\n{detail}",
   "error.provider.antigravityConnectionLost":
@@ -375,12 +386,18 @@ export const messages = defineMessages("error.provider", {
     "Claude's service blocked this request. This is usually a short problem on Claude's side, not a problem with your account. Send the message again in a few minutes.",
   "error.provider.foreignReasoning":
     "{provider} did not accept the earlier reasoning in this chat, because a different account or API key received it. OpenBot started a new {provider} session with the chat history. Try again.",
+  "error.provider.blankHistoryText":
+    "The model did not accept this chat, because its saved history has an empty message. OpenBot started a new {provider} session with the chat history. Try again.",
   "error.provider.codexHistoryItemMissing":
     "Codex could not continue this chat, because an item in its saved history is missing. OpenBot started a new Codex session with the chat history. Try again.",
   "error.provider.codexRequestRefused":
     "{provider} refused the request for this chat and did not give the cause. This can occur in a long chat with many images. OpenBot started a new {provider} session with the chat history. Try again.",
+  "error.provider.codexSafetyBlocked":
+    "{provider} blocked this message because of its safety rules: {reason} The agent does not see this message now, so it does not stop your next messages. Send your request again with different words.",
+  "error.provider.codexSafetyBlockedKept":
+    "{provider} blocked this message because of its safety rules: {reason} If {provider} also blocks your next messages, start a new chat.",
   "error.provider.codexAudioRefused":
-    "The model did not accept audio in this chat. OpenBot started a new Codex session with the chat history. Try again.",
+    "This model cannot listen to audio, so it did not accept the sound in this chat. OpenBot started a new Codex session with the chat history. To continue, send your request again and ask the agent to work without the sound. To check sound, select a model that can listen to audio in the agent's model menu.",
   "error.provider.imageTooSmall":
     "The model did not accept an image in this chat because the image is too small. OpenBot started a new {provider} session with the chat history. Try again.",
   "error.provider.imageTooLarge":

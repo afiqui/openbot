@@ -1,5 +1,6 @@
 import type { ServerSummary } from "@openbot/contracts/ipc";
 import { RemoteCompatibilityScreen } from "@openbot/ui/features/remote-desktop/RemoteCompatibilityScreen";
+import { ServerPlanEndedScreen, serverPlanScreenShown } from "@openbot/ui/features/servers/ServerPlanEnd";
 import type { JSX } from "@solidjs/web";
 import { omit, type ParentProps, Show } from "solid-js";
 import { type WindowPage, windowPageKind } from "./features/window/window-page-context";
@@ -10,33 +11,21 @@ import { WorkspaceLeftPanelResizer } from "./WorkspaceLeftPanelResizer";
 
 type WorkspaceFrameProps = ParentProps<
   {
-    /** Whether the sidebar is drawn compact. The web keeps it wide on a phone, where it is a full pane. */
     compact: boolean;
-    /** Set while the remote-desktop workspace covers the frame. */
     hidden?: boolean;
-    /** A remote server this build cannot talk to. Its screen replaces the middle panes. */
     blockedServer: ServerSummary | null;
     onRetryServer: (serverId: string) => Promise<void>;
-    /** The rails and the sidebar, in paint order. */
+    planDeletesAt: (serverId: string) => number | null;
+    onRenewPlan?: ((serverId: string) => Promise<void>) | undefined;
     left: JSX.Element;
-    /** The page of the rail. A page of another kind than the agents covers the middle panes, and makes them inert. */
     windowPage: WindowPage;
-    /** A page that covers the sidebar and the middle panes below the top row. */
     page?: JSX.Element;
     connection?: JSX.Element;
     initialLoading?: boolean;
-    /** Dialogs and overlays after the panes. */
     after?: JSX.Element;
   } & Omit<JSX.HTMLAttributes<HTMLDivElement>, "children">
 >;
 
-/**
- * The application frame that the desktop shell and the web client share: the grid classes, the left
- * column width and its resizer, the compatibility screen, and the slot of the rail page. The panes come
- * from the caller, because the desktop reads them from its contexts and the web passes props.
- *
- * The order of the children is the paint order the stylesheet expects.
- */
 export function WorkspaceFrame(props: WorkspaceFrameProps) {
   const platform = usePlatform();
   const layout = useLayout();
@@ -47,6 +36,8 @@ export function WorkspaceFrame(props: WorkspaceFrameProps) {
     "hidden",
     "blockedServer",
     "onRetryServer",
+    "planDeletesAt",
+    "onRenewPlan",
     "left",
     "windowPage",
     "page",
@@ -57,8 +48,12 @@ export function WorkspaceFrame(props: WorkspaceFrameProps) {
     "class",
   );
 
-  /** A page that covers the sidebar keeps its column width when the user closed the sidebar. */
   const compactWidth = () => props.compact && (!pageOpen() || layout.leftPanelNarrow());
+  const planScreenShown = () => serverPlanScreenShown(props.blockedServer, props.planDeletesAt);
+  const leftPanelWidth = () => {
+    if (planScreenShown()) return 0;
+    return compactWidth() ? LEFT_PANEL_COMPACT : layout.leftPanelWidth();
+  };
 
   return (
     <div
@@ -79,10 +74,12 @@ export function WorkspaceFrame(props: WorkspaceFrameProps) {
         },
       ]}
       aria-hidden={props.hidden ? "true" : undefined}
-      style={`--left-panel-width: ${compactWidth() ? LEFT_PANEL_COMPACT : layout.leftPanelWidth()}px`}
+      style={`--left-panel-width: ${leftPanelWidth()}px`}
     >
       {props.left}
-      <WorkspaceLeftPanelResizer />
+      <Show when={!planScreenShown()}>
+        <WorkspaceLeftPanelResizer />
+      </Show>
       <div
         class="app-frame-panes server-connection-workspace"
         inert={pageOpen()}
@@ -91,7 +88,19 @@ export function WorkspaceFrame(props: WorkspaceFrameProps) {
         {props.connection}
         <div class="server-connection-content" hidden={props.initialLoading && !props.blockedServer}>
           <Show when={props.blockedServer} keyed fallback={props.children}>
-            {(server) => <RemoteCompatibilityScreen server={server} onRetry={() => props.onRetryServer(server.id)} />}
+            {(server) => (
+              <Show
+                when={planScreenShown()}
+                fallback={<RemoteCompatibilityScreen server={server} onRetry={() => props.onRetryServer(server.id)} />}
+              >
+                <ServerPlanEndedScreen
+                  server={server}
+                  deleteAt={props.planDeletesAt(server.id)}
+                  onRenew={props.onRenewPlan}
+                  onRetry={() => void props.onRetryServer(server.id)}
+                />
+              </Show>
+            )}
           </Show>
         </div>
       </div>

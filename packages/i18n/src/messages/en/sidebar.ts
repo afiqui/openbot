@@ -44,9 +44,6 @@ export const messages = defineMessages("sidebar", {
   "sidebar.topbar.forwardTo": "Forward to {name}",
   "sidebar.empty.noAgents": "No agents yet",
   "sidebar.empty.firstAgent": "Create your first agent",
-  "sidebar.view.label": "Sidebar view",
-  "sidebar.view.agents": "Agents",
-  "sidebar.view.routines": "Routines",
   "sidebar.section.layoutUnsupported": "This server does not support sidebar layout changes.",
   "sidebar.section.actions": "Folder actions",
   "sidebar.section.moveUp": "Move up",
@@ -166,7 +163,6 @@ export const messages = defineMessages("sidebar", {
   "sidebar.storage.used": "{percent} used",
   "sidebar.storage.freeUpSpace": "Free up space",
   "sidebar.storage.dismiss": "Hide until storage is full",
-  // The machine card: a disk, memory or CPU use of the selected server passed its alert level.
   "sidebar.machine.diskTitle": "Disk above {level}",
   "sidebar.machine.memoryTitle": "Memory above {level}",
   "sidebar.machine.cpuTitle": "CPU above {level}",

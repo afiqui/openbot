@@ -18,6 +18,14 @@ import {
 } from "../src/main/custom-message-routing-preference-store";
 import { HostTurnLimitsPreferenceStore } from "../src/main/host-turn-limits-preference-store";
 
+function taskQueue<Queue>(
+  mailbox: { taskWork(agentId: string): ReadonlyMap<string, { queue: Queue[] }> },
+  agentId: string,
+  taskId: string,
+): Queue[] {
+  return mailbox.taskWork(agentId).get(taskId)?.queue ?? [];
+}
+
 const projectRoot = process.env.OPENBOT_WORK_SERVICE_ROOT ?? resolve(import.meta.dirname, "..");
 const output = join(projectRoot, ".openbot-build", "server-work-service-e2e");
 const report: { passed: boolean; checks: string[]; fakeSessions?: number; routingAdapter?: string; error?: string } = {
@@ -161,6 +169,7 @@ async function fixture(): Promise<void> {
   const unused = () => Effect.die(new Error("Browser use is outside this fixture."));
   const browser: AgentBrowserHost = {
     listTabs: () => [],
+    toolCanUseTab: () => false,
     beginTakeover: unused,
     endTakeover: () => {},
     resolveUploadTarget: unused,
@@ -531,7 +540,7 @@ async function fixture(): Promise<void> {
     assert.ok(relatedDelivery);
     assert.equal(mailbox.taskIdForDelivery(relatedDelivery.id), routedTaskId);
     assert.equal(agents.listTasks(incoming.id).tasks.length, 1);
-    assert.ok(mailbox.taskQueue(incoming.id, routedTaskId).some((delivery) => delivery.id === relatedDelivery.id));
+    assert.ok(taskQueue(mailbox, incoming.id, routedTaskId).some((delivery) => delivery.id === relatedDelivery.id));
     assert.ok(routingInputs.at(-1)?.candidates.some((candidate) => candidate.taskId === routedTaskId));
     const explicitStart = routingInputs.length;
     const explicit = await runCauseEffect(
@@ -1146,10 +1155,10 @@ async function fixture(): Promise<void> {
     );
     assert.equal(followup.taskId, alpha.taskId);
     assert.equal(agents.listTasks(worker.id).tasks.length, 2);
-    assert.ok(mailbox.taskQueue(worker.id, alpha.taskId).some((item) => item.messageId === followup.messageId));
+    assert.ok(taskQueue(mailbox, worker.id, alpha.taskId).some((item) => item.messageId === followup.messageId));
     command({ kind: "finish", threadId: alphaSession.threadId, text: "SERVICE_ALPHA_REPLY" });
     await waitFor("alpha reply in source side thread", () =>
-      mailbox.taskQueue(source.id, sourceTask.id).find((item) => item.text.includes("SERVICE_ALPHA_REPLY")),
+      taskQueue(mailbox, source.id, sourceTask.id).find((item) => item.text.includes("SERVICE_ALPHA_REPLY")),
     );
     const alphaNext = await waitFor("follow-up turn", () =>
       agents
@@ -1161,7 +1170,7 @@ async function fixture(): Promise<void> {
     assert.ok(alphaNext.activeTurnId);
     assert.equal((await startedFor(alphaNext.activeTurnId)).threadId, alphaSession.threadId);
     assert.equal(
-      mailbox.taskQueue(source.id, sourceTask.id).filter((item) => item.text.includes("SERVICE_ALPHA_REPLY")).length,
+      taskQueue(mailbox, source.id, sourceTask.id).filter((item) => item.text.includes("SERVICE_ALPHA_REPLY")).length,
       1,
     );
     report.checks.push(
@@ -1211,9 +1220,9 @@ async function fixture(): Promise<void> {
         ),
     );
     assert.equal(
-      mailbox
-        .taskQueue(source.id, sourceTask.id)
-        .filter((item) => item.sender.kind === "agent" && item.sender.agentId === relay.id).length,
+      taskQueue(mailbox, source.id, sourceTask.id).filter(
+        (item) => item.sender.kind === "agent" && item.sender.agentId === relay.id,
+      ).length,
       0,
       "Delegation must not send a no-result answer upstream.",
     );
@@ -1235,7 +1244,7 @@ async function fixture(): Promise<void> {
       expectsReply: false,
     });
     await waitFor("chain reply in original source side thread", () =>
-      mailbox.taskQueue(source.id, sourceTask.id).find((item) => item.text.includes("SERVICE_CHAIN_REPLY")),
+      taskQueue(mailbox, source.id, sourceTask.id).find((item) => item.text.includes("SERVICE_CHAIN_REPLY")),
     );
     command({ kind: "finish", threadId: relayReply.threadId });
     await waitFor("relay explicit answer turn to end", () =>
@@ -1250,9 +1259,9 @@ async function fixture(): Promise<void> {
         ),
     );
     assert.equal(
-      mailbox
-        .taskQueue(source.id, sourceTask.id)
-        .filter((item) => item.sender.kind === "agent" && item.sender.agentId === relay.id).length,
+      taskQueue(mailbox, source.id, sourceTask.id).filter(
+        (item) => item.sender.kind === "agent" && item.sender.agentId === relay.id,
+      ).length,
       1,
       "The chain returns one answer and no synthetic no-result duplicate.",
     );

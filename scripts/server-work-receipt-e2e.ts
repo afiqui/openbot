@@ -305,8 +305,13 @@ async function fixture(): Promise<void> {
     );
     const names = new Map([[owner.id, owner.name]]);
     const history = readHandoffHistory(database, owner.id, mainThreadId, names);
-    const receiptRow = { message: queued.acknowledgement, providerSessionId: null };
-    const raw = { recent: [...history.recent, receiptRow], latest: [receiptRow], hasOlder: false };
+    const receiptRow = { message: queued.acknowledgement, providerSessionId: null, beforeReset: false };
+    const raw = {
+      recent: [...history.recent, receiptRow],
+      latest: [receiptRow],
+      hasOlder: false,
+      resetMessageId: null,
+    };
     const steps = new Map([[queued.deliveryId, "Receipt-only captured steps"]]);
     const packet = renderProviderHandoff(raw, names, steps);
     assert.ok(packet);
@@ -316,7 +321,7 @@ async function fixture(): Promise<void> {
     const routine = renderRoutineHandoff(raw, names, raw);
     assert.ok(routine);
     assert.equal(routine.includes(queued.acknowledgement.text), false);
-    const only = { recent: [receiptRow], latest: [receiptRow], hasOlder: false };
+    const only = { recent: [receiptRow], latest: [receiptRow], hasOlder: false, resetMessageId: null };
     assert.equal(renderProviderHandoff(only, names, steps), null);
     assert.equal(renderRoutineHandoff(only, names, only), null);
     report.checks.push("Provider and routine handoffs omit receipt text and captured receipt steps.");

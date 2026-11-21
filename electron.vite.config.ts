@@ -1,32 +1,41 @@
+import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import solidPlugin from "@solidjs/vite-plugin";
 import tailwindcss from "@tailwindcss/vite";
 import { defineConfig, externalizeDepsPlugin } from "electron-vite";
+import type { Plugin } from "vite";
 import { lazyLanguageCatalogs } from "./packages/i18n/src/vite-plugin";
 import { devWorktree } from "./scripts/dev-worktree-vite-plugin";
 
 const rendererPort = readRendererPort(process.env.OPENBOT_DEV_RENDERER_PORT);
 
-// `bun run dev` rebuilds the main process and preload scripts when a file changes (`--watch`); a
-// production build ignores this. Do not watch installed packages: Bun links them to one shared
-// cache, so an install in another worktree changes their link count. The watcher then rebuilds and
-// restarts the app, and the restart fails while the old app holds the single-instance lock. After
-// you install or update a package, restart `bun run dev`.
 const devWatch = { exclude: ["**/node_modules/**"] };
+
+const benchBuild = process.env.OPENBOT_BENCH_BUILD === "1";
+const perfProbesDefine = { __OPENBOT_PERF_PROBES__: JSON.stringify(benchBuild) };
+
+const SIGNALS_CHUNK = "signals";
+
+const benchRendererOutput = {
+  manualChunks: (id: string) => (id.includes("/@solidjs/signals/") ? SIGNALS_CHUNK : undefined),
+  chunkFileNames: (chunk: { name: string }) =>
+    chunk.name === SIGNALS_CHUNK ? "assets/signals/dist/[name]-[hash].js" : "assets/[name]-[hash].js",
+};
 
 export default defineConfig({
   main: {
     define: {
+      ...perfProbesDefine,
       __OPENBOT_CUSTOM_SERVER_BUILD__: JSON.stringify({
         format: 1,
-        buildId: "server-work-073-sync-prune-20261119",
-        upstreamCommit: "3d9e594836184d54deb9df3160f4e9afe25d4fc4",
-        upstreamVersion: "0.73.0",
+        buildId: "server-work-075-sync-20261120",
+        upstreamCommit: "da138b9fade1a124b53abbba0058bb98431bed6f",
+        upstreamVersion: "0.75.0",
         builtAt: new Date().toISOString(),
       }),
     },
-    // Workspace sources ship as TypeScript and must be bundled for the packaged app.
     plugins: [
+      benchBuildMarker(),
       externalizeDepsPlugin({
         exclude: [
           "@openbot/brand",
@@ -36,7 +45,6 @@ export default defineConfig({
           "@openbot/team-client",
           "@openbot/telemetry",
           "@openbot/user-errors",
-          // Its vendored Baileys source is TypeScript too. Baileys' own dependencies stay external.
           "@openbot/whatsapp",
         ],
       }),
@@ -44,21 +52,14 @@ export default defineConfig({
     build: {
       watch: devWatch,
       rollupOptions: {
-        // Optional peers of the vendored Baileys that OpenBot does not install: Baileys imports them
-        // when it runs and goes on without them (no thumbnails, link previews or audio waveforms).
         external: ["jimp", "sharp", "audio-decode", "link-preview-js"],
         input: {
-          // The entry (`main` in package.json). It loads `index` and reports a damaged installation.
           start: resolve("src/main/start.ts"),
           index: resolve("src/main/index.ts"),
-          // The database host is its own process. Only node:* and the installed Effect package
-          // are runtime imports; the unpacked host must not load the main process bundle.
           "agent-database-host": resolve("src/backend/agent-data/agent-database-host.ts"),
           "database-startup-host": resolve("src/backend/database/database-startup-host.ts"),
           "routine-flow-discovery-host": resolve("src/backend/routine-flows/routine-flow-discovery-host.ts"),
           "claude-history-host": resolve("src/backend/claude-history-host.ts"),
-          // The voice hosts are their own processes too. They import only node:* and load the
-          // sherpa-onnx addon by path.
           "voice-transcription-host": resolve("src/main/voice-transcription-host.ts"),
           "voice-speech-host": resolve("src/main/voice-speech-host.ts"),
         },
@@ -83,18 +84,18 @@ export default defineConfig({
     },
   },
   renderer: {
-    // The Solid Performance panel tracks record each effect run under `vite dev`, and make a send
-    // in a chat drop frames that the built app does not drop. Set this to true for a trace.
+    define: perfProbesDefine,
     plugins: [
-      solidPlugin({ performanceTracks: false }),
+      solidPlugin({
+        performanceTracks: false,
+        observe: benchBuild,
+        ...(benchBuild ? { solid: { sourceNames: { locations: true } } } : {}),
+      }),
       tailwindcss({ optimize: false }),
       lazyLanguageCatalogs(),
-      // The branch and color of this worktree in a dev renderer (`src/renderer/src/dev-worktree.ts`).
       devWorktree(resolve(".")),
     ],
     optimizeDeps: {
-      // bloub finds its plush images with `new URL(..., import.meta.url)`. A pre-bundle moves the
-      // code away from the images, so Vite serves the package as it is.
       exclude: ["@norbert_bodziony/bloub", "@norbert_bodziony/bloub/plush"],
     },
     resolve: {
@@ -109,13 +110,29 @@ export default defineConfig({
           browserPip: resolve("src/renderer/browser-pip.html"),
           browserPipControls: resolve("src/renderer/browser-pip-controls.html"),
           teamWebrtc: resolve("src/renderer/team-webrtc.html"),
-          // The setup page of a server in a container. src/main/server-setup-page.ts serves it.
           serverSetup: resolve("src/renderer/server-setup.html"),
         },
+        ...(benchBuild ? { output: benchRendererOutput } : {}),
       },
+      ...(benchBuild ? { minify: false } : {}),
     },
   },
 });
+
+function benchBuildMarker(): Plugin {
+  return {
+    name: "openbot-bench-build-marker",
+    apply: "build",
+    writeBundle(options) {
+      if (!benchBuild || !options.dir) return;
+      mkdirSync(options.dir, { recursive: true });
+      writeFileSync(
+        resolve(options.dir, "bench-build.json"),
+        `${JSON.stringify({ perfProbes: true, solidObserve: true, builtAt: new Date().toISOString() })}\n`,
+      );
+    },
+  };
+}
 
 function readRendererPort(value: string | undefined): number | undefined {
   if (value === undefined) return undefined;

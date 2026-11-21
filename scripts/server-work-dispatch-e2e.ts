@@ -20,6 +20,14 @@ import { MailboxStore } from "../src/backend/mailbox-store";
 import { OpenBotDatabase } from "../src/backend/openbot-database";
 import { agentTasksWireSnapshot } from "../src/main/team-api/route-agent-tasks";
 
+function taskQueue<Queue>(
+  mailbox: { taskWork(agentId: string): ReadonlyMap<string, { queue: Queue[] }> },
+  agentId: string,
+  taskId: string,
+): Queue[] {
+  return mailbox.taskWork(agentId).get(taskId)?.queue ?? [];
+}
+
 const projectRoot = process.env.OPENBOT_WORK_DISPATCH_ROOT ?? resolve(import.meta.dirname, "..");
 const output = join(projectRoot, ".openbot-build", "server-work-dispatch-e2e");
 const report: { passed: boolean; checks: string[]; error?: string } = { passed: false, checks: [] };
@@ -104,7 +112,7 @@ async function fixture(): Promise<void> {
 
   let state = await open();
   async function cancelAndRemoveTaskMessages(agentId: string, taskId: string): Promise<void> {
-    for (const delivery of state.mailbox.taskQueue(agentId, taskId)) {
+    for (const delivery of taskQueue(state.mailbox, agentId, taskId)) {
       assert.equal(delivery.status, "queued", "Only a queued fixture request is cancelled.");
       await runCauseEffect(state.mailbox.cancel(agentId, delivery.id));
     }
@@ -262,7 +270,7 @@ async function fixture(): Promise<void> {
       try {
         await refused;
         assert.equal(
-          state.mailbox.taskQueue(worker.id, ready.work.taskId).length,
+          taskQueue(state.mailbox, worker.id, ready.work.taskId).length,
           0,
           "A refused attachment send leaves no queued delivery.",
         );
@@ -318,7 +326,7 @@ async function fixture(): Promise<void> {
     const fresh = await send("deleted", "request-deleted-again");
     assert.equal(state.tasks.has(worker.id, fresh.work.taskId), true);
     assert.equal(
-      state.mailbox.taskQueue(worker.id, fresh.work.taskId).length,
+      taskQueue(state.mailbox, worker.id, fresh.work.taskId).length,
       1,
       "Deleted work history does not return.",
     );
@@ -333,7 +341,7 @@ async function fixture(): Promise<void> {
     await assert.rejects(send("over-limit", "request-over-limit"));
     const snapshot = state.tasks.snapshot(worker.id);
     assert.equal(snapshot.limit, 50, "The internal snapshot reports the real execution limit.");
-    const wire = agentTasksWireSnapshot(snapshot);
+    const wire = agentTasksWireSnapshot(snapshot, new Set());
     assert.equal(wire.limit, 4, "The existing Team API projection keeps the released bound.");
     assert.ok(agentTasksEvent({ type: "agent-tasks-changed", snapshot: wire }));
     assert.equal(snapshot.tasks.length, 50);
@@ -437,7 +445,7 @@ async function fixture(): Promise<void> {
       "Queue-to-Thread retry returns the original main receipt without a new decision, task or replay.",
     );
 
-    for (const delivery of state.mailbox.taskQueue(reverseWorker.id, automatic.work.taskId)) {
+    for (const delivery of taskQueue(state.mailbox, reverseWorker.id, automatic.work.taskId)) {
       await runCauseEffect(state.mailbox.cancel(reverseWorker.id, delivery.id));
     }
     state.tasks.close(state.tasks.require(reverseWorker.id, automatic.work.taskId));

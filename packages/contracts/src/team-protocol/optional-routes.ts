@@ -1,7 +1,4 @@
 import { ACP_REGISTRY_CODECS } from "./acp-registry-v1";
-// The optional admin routes, one table. `teamSideRouteCodec` in `side-routes.ts` asks here, so every
-// HTTP and WebRTC transport encodes an admin route with its frozen codec. A path that is not listed
-// goes to the protocol adapter.
 import type { OptionalRouteCodec } from "./admin-wire";
 import { AGENT_ACCESS_CODECS } from "./agent-access-v1";
 import { AGENT_ACTIVE_QUEUES_CODECS } from "./agent-active-queues-v1";
@@ -116,6 +113,7 @@ import { PROVIDER_DETECTION_CODECS } from "./provider-detection-v1";
 import { PROVIDER_ENVIRONMENT_CODECS } from "./provider-environment-v1";
 import { PROVIDER_HOST_SIGN_IN_CODECS } from "./provider-host-sign-in-v1";
 import { PROVIDER_MODEL_SOURCE_CODECS } from "./provider-model-source-v1";
+import { PROVIDER_SIGN_IN_RELAY_V2_CODECS } from "./provider-sign-in-relay-v2";
 import { PROVIDER_SIGN_OUT_CODECS } from "./provider-sign-out-v1";
 import { PROVIDER_USAGE_RESET_CODECS } from "./provider-usage-reset-v1";
 import { PROVIDER_USE_CODECS } from "./provider-use-v1";
@@ -165,7 +163,10 @@ import { WHATSAPP_WORKING_MESSAGE_CODECS } from "./whatsapp-working-message-v1";
 import { WORKFLOWS_GITHUB_CODECS } from "./workflows-github-v1";
 import { WORKFLOWS_HIGGSFIELD_CODECS } from "./workflows-higgsfield-v1";
 import { WORKFLOWS_MEDIA_CATALOG_CODECS } from "./workflows-media-catalog-v1";
+import { WORKFLOWS_MEDIA_CATALOG_V2_CODECS } from "./workflows-media-catalog-v2";
+import { WORKFLOWS_MEDIA_SERVICE_ACCOUNT_CODECS } from "./workflows-media-service-account-v1";
 import { WORKFLOWS_MEDIA_CODECS } from "./workflows-media-v1";
+import { WORKFLOWS_STEP_SETTINGS_CODECS } from "./workflows-step-settings-v1";
 import { WORKFLOWS_SUNRA_CODECS } from "./workflows-sunra-v1";
 import { WORKFLOWS_CODECS } from "./workflows-v1";
 import { WORKSPACE_DIRECTORY_CODECS } from "./workspace-directory-v1";
@@ -289,6 +290,7 @@ const CODECS: ReadonlyMap<string, OptionalRouteCodec> = new Map([
   ...PROVIDER_USAGE_RESET_CODECS,
   ...USAGE_CREDITS_CODECS,
   ...PROVIDER_SIGN_OUT_CODECS,
+  ...PROVIDER_SIGN_IN_RELAY_V2_CODECS,
   ...ONEPASSWORD_CONNECTOR_CODECS,
   ...BITWARDEN_CONNECTOR_CODECS,
   ...AGENT_ACCESS_CODECS,
@@ -329,7 +331,10 @@ const CODECS: ReadonlyMap<string, OptionalRouteCodec> = new Map([
   ...WORKFLOWS_MEDIA_CODECS,
   ...WORKFLOWS_SUNRA_CODECS,
   ...WORKFLOWS_HIGGSFIELD_CODECS,
+  ...WORKFLOWS_MEDIA_SERVICE_ACCOUNT_CODECS,
   ...WORKFLOWS_MEDIA_CATALOG_CODECS,
+  ...WORKFLOWS_MEDIA_CATALOG_V2_CODECS,
+  ...WORKFLOWS_STEP_SETTINGS_CODECS,
   ...SIDEBAR_FOLDERS_CODECS,
   ...LIBRARY_FOLDERS_CODECS,
   ...VAULT_CODECS,

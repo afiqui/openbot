@@ -5,6 +5,7 @@ import type { ConversationMessage, ConversationSnapshot, ImageGenerationInfo } f
 import { mergeImageGenerationInfo } from "@openbot/contracts/ipc";
 import { isDynamicRecord, isString } from "@openbot/contracts/runtime-values";
 import { isServerWorkReceipt } from "../agent/server-work-receipt";
+import { perfTimed } from "../perf-probe-hooks";
 import type { AgentRoster } from "./agent-roster";
 import { recordUsageMessage } from "./agent-usage";
 import { type DatabaseCore, deleteReceiptsOf, deleteThreadAttachments } from "./database-core";
@@ -26,12 +27,6 @@ import {
 import { currentConversationMessage } from "./legacy-conversation-message";
 import { readOrderInputs, refreshChangedOrder, refreshThreadOrder } from "./thread-message-order";
 
-/**
- * The message as a write compares it, with no queue position. A position moves each time a delivery
- * ahead of it starts or goes back, and each reader takes it from the mailbox again
- * (`syncMailboxMessages`, `refreshQueuePositions`). Stored, each move wrote every queued message
- * again in the recipient's chat and in each sender's chat.
- */
 export function withoutQueuePositions(message: ConversationMessage): ConversationMessage {
   const { delivery, exchange } = message;
   if (!delivery && !exchange) return message;
@@ -49,29 +44,11 @@ export interface ConversationWriterOptions {
   roster: AgentRoster;
 }
 
-/**
- * The write side of a thread's conversation: a whole snapshot, one appended message, or one message
- * of a run of streamed text.
- *
- * Owns `projection_thread_messages` and `projection_thread_activities`, and compacts the thread
- * aggregate so the log keeps only the newest full snapshot and the streamed messages after it. Each
- * entry point runs inside a single dispatch, so a caller already in a transaction has these writes
- * pulled into it, and none of them opens a transaction of its own. The agent lookup and the thread
- * projection row come from the roster. Every entry point also keeps the stored shown-order keys of the
- * rows it wrote, through `thread-message-order.ts`. The class never imports the facade.
- *
- * Pick by how much is known to have changed, not by convenience: `persistConversation` costs as
- * much as the thread is long, so a caller on a hot path that changed one message must use
- * `persistStreamingMessage` instead.
- */
 export class ConversationWriter {
   readonly #core: DatabaseCore;
   readonly #roster: AgentRoster;
-  /**
-   * For each thread, the whole snapshot that the last prune kept. That prune removed every superseded
-   * event before it, so the next prune only reads the events from there on.
-   */
   readonly #prunedThrough = new Map<string, number>();
+  readonly #streamedEvents = new StreamedEventSequences();
 
   constructor(options: ConversationWriterOptions) {
     this.#core = options.core;
@@ -86,7 +63,6 @@ export class ConversationWriter {
   ): ConversationSnapshot {
     if (!written.threadId) return structuredClone(written);
     const threadId = written.threadId;
-    // A message that a person deleted stays deleted, also when a held snapshot still has it.
     const snapshot = {
       ...written,
       messages: withoutDeletedMessages(this.#core.connection, threadId, written.messages).filter(
@@ -189,7 +165,6 @@ export class ConversationWriter {
           new Date().toISOString(),
           sequence,
         );
-        // A late write for a turn that already ended must not open it again (#2214).
         if (snapshot.activeTurnId) {
           db.prepare(`
             INSERT INTO projection_turns
@@ -215,7 +190,6 @@ export class ConversationWriter {
              WHERE thread_id = ? AND turn_id = ?`,
           ).run(status, new Date().toISOString(), sequence, snapshot.threadId, payload.turnId);
         }
-        // The ordinals follow the snapshot, so any turn can have moved.
         refreshThreadOrder(db, threadId);
         pruneConversationSnapshots(db, threadId, pruneFrom, sequence);
         return { revision: sequence };
@@ -227,14 +201,6 @@ export class ConversationWriter {
     return { ...structuredClone(snapshot), revision: result.revision };
   }
 
-  /**
-   * Where the next prune of the thread starts: the whole snapshot that the last prune kept, or, the first
-   * time after a start, the oldest sequence of the thread's message rows. A whole snapshot writes every
-   * message row of the thread, and each later write only gives a row a newer sequence, so no row is older
-   * than the last whole snapshot, and the events before it were pruned with it. When every row was
-   * written again since, the start is later: that snapshot and the flushes after it stay in the log,
-   * which a replay reads correctly. A thread with no message row starts at the beginning, as before.
-   */
   #pruneFrom(db: DatabaseSync, threadId: string): number {
     const kept = this.#prunedThrough.get(threadId);
     if (kept !== undefined) return kept;
@@ -246,29 +212,6 @@ export class ConversationWriter {
     return (oldest && optionalNumberColumn(oldest, "sequence")) ?? 0;
   }
 
-  /**
-   * The write behind one flushed run of streamed text.
-   *
-   * `persistConversation` rewrites the whole thread: it puts the entire snapshot in the event
-   * payload, re-upserts every message, and clones the snapshot back out. A streaming flush arrives
-   * ten times a second per streaming message, so that cost - which grows with the thread's whole
-   * history - was paid ten times a second per agent, on the main process, inside a write
-   * transaction that every other agent then queued behind. A six-agent channel on mature threads
-   * saturated the main process with it.
-   *
-   * Only one message changes, so only that message is written. The event carries the message
-   * whole rather than the delta, because the text is not always an append: `item/completed`
-   * replaces it outright, so summing deltas would not rebuild it. A whole message also makes each
-   * event idempotent and order-independent, which is what keeps a replay correct after a prune
-   * removes some of the run.
-   *
-   * The previous unsuperseded event for the same message is deleted in the same transaction, so a
-   * streaming message holds one event rather than one per flush and the log grows with the text,
-   * not with the square of it.
-   *
-   * Returns the new revision alone. Returning the snapshot would clone the whole history back to a
-   * caller that only reads `revision` from it.
-   */
   persistStreamingMessage(input: {
     snapshot: ConversationSnapshot;
     messageId: string;
@@ -278,10 +221,6 @@ export class ConversationWriter {
   }): number {
     const { snapshot, messageId } = input;
     const threadId = snapshot.threadId;
-    // A thread is required to address a projection row, and the message has to be in the snapshot
-    // for its ordinal to be known. Neither holds for a flush that races a thread reset, so fall
-    // back to the whole-snapshot write rather than drop the text.
-    // A late flush of a message that a person deleted writes nothing.
     if (threadId && isDeletedThreadMessage(this.#core.connection, threadId, messageId)) {
       return this.#threadRevision(threadId);
     }
@@ -311,7 +250,11 @@ export class ConversationWriter {
         const agent = this.#roster.getAgent(snapshot.agentId);
         if (!agent) throw new Error(`Unknown agent for conversation: ${snapshot.agentId}`);
         this.#roster.ensureThreadProjection(db, agent, sequence);
-        supersedeStreamedMessageEvents(db, this.#core, threadId, messageId, input.eventType, sequence);
+        const streamedEvent = { threadId, messageId, eventType: input.eventType };
+        perfTimed("db.supersedeStreamed", () =>
+          supersedeStreamedMessageEvents(this.#core, streamedEvent, sequence, this.#streamedEvents.get(streamedEvent)),
+        );
+        this.#streamedEvents.set(streamedEvent, sequence);
         const orderBefore = readOrderInputs(db, threadId, [message.id]);
         this.#core
           .statement(`
@@ -342,8 +285,6 @@ export class ConversationWriter {
             sequence,
           );
         refreshChangedOrder(db, threadId, orderBefore, [message.id]);
-        // A no-op while the message streams - the helper ignores anything but a settled message -
-        // and the one call that matters if a flush ever lands on a completed one.
         recordUsageMessage(db, agent.id, message, agent.provider, agent.model);
         this.#core
           .statement(
@@ -456,13 +397,7 @@ export class ConversationWriter {
     return result.revision;
   }
 
-  /**
-   * The messages that `persistConversationChanges` would store differently: a message with no row,
-   * or one whose merge into its row changes the stored value. Key order does not count, because
-   * the merge keeps the key order of the row.
-   */
   changedConversationMessages(threadId: string, written: readonly ConversationMessage[]): ConversationMessage[] {
-    // A message that a person deleted is never a change: the writer skips it.
     const messages = withoutDeletedMessages(this.#core.connection, threadId, written).filter(
       (message) => !isServerWorkReceipt(message),
     );
@@ -483,7 +418,6 @@ export class ConversationWriter {
     return messages.filter((message) => {
       const existing = stored.get(message.id);
       if (!existing) return true;
-      // The JSON round trip drops `undefined` keys, as the stored row does.
       return !isDeepStrictEqual(
         JSON.parse(JSON.stringify(withoutQueuePositions(mergeLiveMessage(existing, message)))),
         withoutQueuePositions(existing),
@@ -491,13 +425,6 @@ export class ConversationWriter {
     });
   }
 
-  /**
-   * Applies the changed part of a bounded conversation projection.
-   *
-   * The caller may omit older messages. This method only upserts the messages it receives and
-   * removes the explicit ids, so a bounded working snapshot can never delete an omitted durable
-   * row. The event payload is also incremental, which keeps replay independent of the full chat.
-   */
   persistConversationChanges(input: {
     agentId: string;
     threadId: string;
@@ -507,10 +434,6 @@ export class ConversationWriter {
     eventType: string;
     detail?: unknown;
     commandId?: string;
-    /**
-     * The shown messages that a person deletes. Each one is recorded, so no later write brings it
-     * back, and is removed with its attachments like a removed id.
-     */
     deletedMessageIds?: readonly string[];
   }): number {
     const deletedMessageIds = input.deletedMessageIds ?? [];
@@ -585,15 +508,11 @@ export class ConversationWriter {
           const existing = existingRow
             ? currentConversationMessage(JSON.parse(requiredStringColumn(existingRow, "message_json")))
             : null;
-          // This is a live projection update. Provider-history reconciliation uses the additive
-          // merge below, but a streamed update must replace status and text from the caller. The
-          // historical merge keeps the old turn id and can therefore preserve stale live state.
           const message = existing ? mergeLiveMessage(existing, imported) : imported;
           let ordinal: number;
           if (existingRow) {
             ordinal = requiredNumberColumn(existingRow, "ordinal");
           } else {
-            // Read the thread's next ordinal once; each new message of this write takes the one after.
             appendOrdinal ??= requiredNumberColumn(
               databaseRow(nextOrdinal.get(input.threadId)) ?? { ordinal: 0 },
               "ordinal",
@@ -629,7 +548,6 @@ export class ConversationWriter {
         const deleteMessage = db.prepare(
           "DELETE FROM projection_thread_messages WHERE thread_id = ? AND message_id = ?",
         );
-        // Before the rows go: a read cursor on a deleted message moves to the message shown before it.
         const deletedAt = new Date().toISOString();
         for (const messageId of deletedMessageIds) recordDeletedThreadMessage(db, input.threadId, messageId, deletedAt);
         for (const messageId of removedMessageIds) {
@@ -641,7 +559,6 @@ export class ConversationWriter {
           `UPDATE projection_threads
            SET active_turn_id = ?, updated_at = ?, last_event_sequence = ? WHERE thread_id = ?`,
         ).run(input.activeTurnId, new Date().toISOString(), sequence, input.threadId);
-        // A late write for a turn that already ended must not open it again (#2214).
         if (input.activeTurnId) {
           db.prepare(`
             INSERT INTO projection_turns
@@ -673,8 +590,6 @@ export class ConversationWriter {
           ).run(status, new Date().toISOString(), sequence, input.threadId, input.detail.turnId);
         }
         if (input.eventType === "turn.interrupted-by-restart") {
-          // Restart recovery runs before any provider starts, so no turn of this thread runs.
-          // A running row that is not the thread's active turn has no other writer (#2214).
           db.prepare(
             `UPDATE projection_turns
              SET status = 'interrupted', completed_at = COALESCE(completed_at, ?), last_event_sequence = ?
@@ -702,13 +617,6 @@ export class ConversationWriter {
     return result.revision;
   }
 
-  /**
-   * Deletes every shown message of a thread, for "Delete history": each one is recorded as deleted,
-   * so no later write, import or replay brings it back, and goes with its attachments. The earlier
-   * events of the thread lose their messages, and the compaction summaries of the thread go, because
-   * they hold the text of the deleted messages. Returns the stored revision. Only a chat with no
-   * active turn can lose its history.
-   */
   deleteThreadHistory(input: { agentId: string; threadId: string }): number {
     const eventType = "conversation.history-deleted";
     return this.#core.dispatch(
@@ -732,13 +640,11 @@ export class ConversationWriter {
         deleteThreadAttachments(db, input.threadId);
         db.prepare("DELETE FROM projection_thread_messages WHERE thread_id = ?").run(input.threadId);
         db.prepare("DELETE FROM projection_thread_summaries WHERE thread_id = ?").run(input.threadId);
-        // The receipt of a summary command holds the summary text too.
         const summaryEvents =
           "FROM orchestration_events WHERE aggregate_type = 'thread' AND aggregate_id = ? AND event_type = 'thread.summary-created'";
         const summaryCommands = databaseRows(
           db.prepare(`SELECT DISTINCT command_id ${summaryEvents}`).all(input.threadId),
         ).map((row) => requiredStringColumn(row, "command_id"));
-        // After a replay, the activity row of a summary event holds the whole payload, summary text included.
         db.prepare(
           `DELETE FROM projection_thread_activities WHERE thread_id = ? AND last_event_sequence IN (SELECT sequence ${summaryEvents})`,
         ).run(input.threadId, input.threadId);
@@ -754,14 +660,6 @@ export class ConversationWriter {
     );
   }
 
-  /**
-   * Upserts one message learned from a paged provider history read.
-   *
-   * This operation never removes rows that are absent from the provider page. Existing local
-   * identity, author, ordering, delivery, attachments and reactions are retained while provider
-   * text/status fields are refreshed. The event contains this one message, so replay has the same
-   * non-destructive behavior without rebuilding a full conversation snapshot.
-   */
   upsertProviderHistoryMessage(input: {
     agentId: string;
     threadId: string;
@@ -773,7 +671,6 @@ export class ConversationWriter {
   }): number {
     const eventType = input.eventType ?? "provider-history.message-imported";
     if (isServerWorkReceipt(input.message)) return this.#threadRevision(input.threadId);
-    // A provider keeps its own history, so an import can meet a message that a person deleted here.
     if (isDeletedThreadMessage(this.#core.connection, input.threadId, input.message.id)) {
       return this.#threadRevision(input.threadId);
     }
@@ -928,7 +825,6 @@ export class ConversationWriter {
     return result.revision;
   }
 
-  /** The thread's revision, for a write that changes nothing. */
   #threadRevision(threadId: string): number {
     const revision = databaseRow(
       this.#core.connection
@@ -939,21 +835,14 @@ export class ConversationWriter {
   }
 }
 
-/** The events that end a turn. Only their write closes the stored turn row. */
 export function isTurnEndEvent(eventType: string): boolean {
   return ["turn.completed", "turn.reconciled-after-restart", "turn.interrupted-by-restart"].includes(eventType);
 }
 
-/** A turn-end event clears the active turn, so the turn it ends is only in its detail (#3722). */
 export function activityTurnId(eventType: string, detail: unknown, activeTurnId: string | null): string | null {
   return isTurnEndEvent(eventType) && isDynamicRecord(detail) && isString(detail.turnId) ? detail.turnId : activeTurnId;
 }
 
-/**
- * A generated image that OpenBot could not save, or that stopped, keeps its status and its reason when
- * provider history comes again. The history can mark the call completed but gives OpenBot no file, and
- * a completed image with no file showed only "The generated image preview is unavailable" (#10267).
- */
 export function keptUnsavedImage(
   existing: ConversationMessage,
   imported: ConversationMessage,
@@ -1004,7 +893,6 @@ function mergeLiveMessage(existing: ConversationMessage, updated: ConversationMe
     ...updated,
     id: existing.id,
     author: existing.author,
-    // Mailbox updates can move a queued message to the time it joined a running turn.
     createdAt: updated.delivery ? updated.createdAt : existing.createdAt,
     ...(turnId === undefined ? {} : { turnId }),
   };
@@ -1048,89 +936,81 @@ function conversationRecoveryState(
   return { turnProviderSessionIds };
 }
 
-/**
- * Drops the earlier events for a message that is still streaming, so the log holds one event per
- * streaming message instead of one per 100 ms flush.
- *
- * The delete returns the command IDs in the same pass over the indexed events. Delete their
- * receipts by key in the same transaction.
- */
+interface StreamedEvent {
+  threadId: string;
+  messageId: string;
+  eventType: string;
+}
+
+const REMEMBERED_STREAMED_EVENTS = 1024;
+
+class StreamedEventSequences {
+  readonly #sequences = new Map<string, number>();
+
+  get(event: StreamedEvent): number | undefined {
+    return this.#sequences.get(streamedEventKey(event));
+  }
+
+  set(event: StreamedEvent, sequence: number): void {
+    const key = streamedEventKey(event);
+    this.#sequences.delete(key);
+    this.#sequences.set(key, sequence);
+    if (this.#sequences.size <= REMEMBERED_STREAMED_EVENTS) return;
+    const oldest = this.#sequences.keys().next().value;
+    if (oldest !== undefined) this.#sequences.delete(oldest);
+  }
+}
+
+function streamedEventKey(event: StreamedEvent): string {
+  return JSON.stringify([event.threadId, event.eventType, event.messageId]);
+}
+
 function supersedeStreamedMessageEvents(
-  db: DatabaseSync,
   core: DatabaseCore,
-  threadId: string,
-  messageId: string,
-  eventType: string,
+  event: StreamedEvent,
   retainedSequence: number,
+  rememberedSequence: number | undefined,
 ): void {
-  // Each flush deletes the event before it, so a message keeps at most one streamed event. When the
-  // projection row names that event, it is deleted by its key. The search below parses the kept
-  // event of every message that the thread ever streamed, and it ran on each flush of each agent.
-  const previous = databaseRow(
-    core
-      .statement(
-        `SELECT e.sequence, e.command_id FROM projection_thread_messages m
+  const { threadId, messageId, eventType } = event;
+  const previous =
+    databaseRow(
+      core
+        .statement(
+          `SELECT e.sequence, e.command_id FROM projection_thread_messages m
          JOIN orchestration_events e ON e.sequence = m.last_event_sequence
          WHERE m.thread_id = ? AND m.message_id = ? AND e.aggregate_type = 'thread' AND e.aggregate_id = ?
            AND e.event_type = ? AND e.sequence < ? AND json_extract(e.payload_json, '$.streamedMessage.id') = ?`,
-      )
-      .get(threadId, messageId, threadId, eventType, retainedSequence, messageId),
-  );
-  if (previous) {
-    core
-      .statement("DELETE FROM orchestration_events WHERE sequence = ?")
-      .run(requiredNumberColumn(previous, "sequence"));
-    deleteReceiptsOf(db, [requiredStringColumn(previous, "command_id")]);
-    return;
-  }
-  // Another write of the message came after its last flush, or the message is new: search.
-  // `event_type` is matched before the payload is read on purpose. A thread keeps one whole
-  // snapshot, whose payload holds every message, and `json_extract` over it costs as much as the
-  // history is long - the very cost this path exists to avoid. The type match rejects that row
-  // without parsing it, and leaves only the short streamed-message payloads to read.
-  const matchSuperseded = `
-    aggregate_type = 'thread' AND aggregate_id = ? AND event_type = ? AND sequence < ?
-      AND json_extract(payload_json, '$.streamedMessage.id') = ?`;
-  const supersededCommandIds = databaseRows(
-    db
-      .prepare(`DELETE FROM orchestration_events WHERE ${matchSuperseded} RETURNING command_id`)
-      .all(threadId, eventType, retainedSequence, messageId),
-  ).map((row) => requiredStringColumn(row, "command_id"));
-  deleteReceiptsOf(db, supersededCommandIds);
+        )
+        .get(threadId, messageId, threadId, eventType, retainedSequence, messageId),
+    ) ??
+    (rememberedSequence === undefined
+      ? undefined
+      : databaseRow(
+          core
+            .statement(
+              `SELECT sequence, command_id FROM orchestration_events
+               WHERE sequence = ? AND aggregate_type = 'thread' AND aggregate_id = ? AND event_type = ?
+                 AND sequence < ? AND json_extract(payload_json, '$.streamedMessage.id') = ?`,
+            )
+            .get(rememberedSequence, threadId, eventType, retainedSequence, messageId),
+        ));
+  if (!previous) return;
+  core.statement("DELETE FROM orchestration_events WHERE sequence = ?").run(requiredNumberColumn(previous, "sequence"));
+  deleteReceiptsOf(core.connection, [requiredStringColumn(previous, "command_id")]);
 }
 
 const CONVERSATION_UPDATED = "conversation.snapshot-updated";
-/** The command id that a write gets when its caller gives none: new for each write. */
 const GENERATED_UPDATE_COMMAND =
   /^conversation:conversation\.snapshot-updated:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-/**
- * The activity row of an update, found again by its key. `projection_thread_activities` has no
- * index on the thread or the sequence, so a search by them reads the whole table.
- */
 function updateActivityId(sequence: number): string {
   return `${CONVERSATION_UPDATED}:${sequence}`;
 }
 
-/** The activity row of a whole snapshot, found again by its key when a later snapshot prunes it. */
 function snapshotActivityId(sequence: number): string {
   return `conversation.snapshot:${sequence}`;
 }
 
-/**
- * Drops the thread's previous event when it is an update that the new one replaces whole, so a chat
- * that changes the same messages again and again keeps one event, not one per change. A queue that
- * moved every 0.4 s for a day wrote 1.7 million of them, 66 GB, into one database.
- *
- * A replay (`ThreadReplay`) gives the same thread without it: each message of the new event replaces
- * the earlier one with `{ ...earlier, ...new }` and keeps the earlier author, and the earlier time when
- * the new message has no delivery. So an earlier message leaves nothing behind when the new one has
- * all its keys, its author and, with no delivery, its time, and the new event sets the same active
- * turn. Only the event just before the new one is read, so no other event can depend on it, and its
- * messages come first in the new event in the same order, so a replay adds them in the same order.
- * Only an event with a generated command id goes: that id is new for each write, so no sender can
- * send the command again and need its receipt.
- */
 function supersedePreviousConversationUpdate(
   db: DatabaseSync,
   threadId: string,
@@ -1138,8 +1018,6 @@ function supersedePreviousConversationUpdate(
   changedMessages: readonly ConversationMessage[],
   activeTurnId: string | null,
 ): void {
-  // The type and the command first: a whole snapshot holds every message of the thread, and its
-  // payload is read only when the event can be superseded.
   const previous = databaseRow(
     db
       .prepare(
@@ -1161,7 +1039,6 @@ function supersedePreviousConversationUpdate(
     !replacedUpdate(JSON.parse(requiredStringColumn(payload, "payload_json")), changedMessages, activeTurnId)
   )
     return;
-  // An update written before this key existed keeps its activity row: one row for each thread.
   db.prepare("DELETE FROM projection_thread_activities WHERE activity_id = ?").run(updateActivityId(previousSequence));
   db.prepare("DELETE FROM orchestration_events WHERE sequence = ?").run(previousSequence);
   deleteReceiptsOf(db, [commandId]);
@@ -1181,30 +1058,17 @@ function replacedUpdate(
     if (!isDynamicRecord(message) || next === undefined || message.id !== next.id) return false;
     if (message.author !== next.author || (next.delivery === undefined && message.createdAt !== next.createdAt))
       return false;
-    // A key the new message leaves undefined is not in its stored JSON, so the earlier value would stay.
     const nextKeys = new Set(Object.entries(next).flatMap(([key, value]) => (value === undefined ? [] : [key])));
     return Object.keys(message).every((key) => nextKeys.has(key));
   });
 }
 
-/**
- * Removes the whole snapshots and streamed-message events that a newer whole snapshot replaces, from
- * `fromSequence` up to the retained one.
- *
- * Only that range is read. Matching an event reads its payload, and reading every event of a thread
- * with 300,000 of them read gigabytes on the main process at each whole snapshot and froze the app.
- * The prune of the previous whole snapshot already removed the matches before it, so a later start
- * leaves nothing behind that this prune would have removed.
- */
 function pruneConversationSnapshots(
   db: DatabaseSync,
   threadId: string,
   fromSequence: number,
   retainedSequence: number,
 ): void {
-  // A streamed-message event is superseded by any later whole snapshot exactly as an older snapshot
-  // is: the snapshot carries that message's text too. Leaving them would let the flushes of an
-  // interrupted turn stay in the log for the life of the thread.
   const superseded = databaseRows(
     db
       .prepare(

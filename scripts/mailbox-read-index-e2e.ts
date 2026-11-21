@@ -131,6 +131,9 @@ try {
     if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, canonical(item, aliases)]));
     return value;
   }
+  function taskQueue(m, agent, task) {
+    return m.taskQueue ? m.taskQueue(agent, task) : (m.taskWork(agent).get(task)?.queue ?? []);
+  }
   function inspect(item) {
     const m = item.mailbox;
     const result = {};
@@ -149,10 +152,10 @@ try {
     result.tasks = Array.from({ length: 50 }, (_, i) => {
       const task = "task-" + i;
       return { task, next: m.nextQueued("agent-0", task), active: m.laneActive("agent-0", task), busy: m.taskBusy("agent-0", task),
-        queued: m.queuedTaskMessages("agent-0", task), queue: m.taskQueue("agent-0", task), ids: m.laneQueuedIds("agent-0", task) };
+        queued: m.queuedTaskMessages("agent-0", task), queue: taskQueue(m, "agent-0", task), ids: m.laneQueuedIds("agent-0", task) };
     });
-    result.moved = m.taskQueue("agent-0", "moved-task");
-    result.answer = m.taskQueue("agent-0", "answer-task");
+    result.moved = taskQueue(m, "agent-0", "moved-task");
+    result.answer = taskQueue(m, "agent-0", "answer-task");
     return canonical(result, item.aliases);
   }
   function compare(label) {
@@ -261,7 +264,7 @@ try {
       observed += Number(Boolean(m.nextQueued("agent-0", task)));
       observed += Number(m.laneActive("agent-0", task));
       observed += m.queuedTaskMessages("agent-0", task).length;
-      observed += m.taskQueue("agent-0", task).length;
+      observed += taskQueue(m, "agent-0", task).length;
     }
     observed += m.conversationMessages("agent-0", { fromCreatedAt: "2026-01-01T03:00:00.000Z" }).length;
     for (const id of providerIds) observed += Number(Boolean(m.deliveryForProviderMessage("agent-0", id)));

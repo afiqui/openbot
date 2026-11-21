@@ -18,6 +18,14 @@ import { runCauseEffect } from "../src/backend/effect-boundary";
 import { MailboxStore } from "../src/backend/mailbox-store";
 import { OpenBotDatabase } from "../src/backend/openbot-database";
 
+function taskQueue<Queue>(
+  mailbox: { taskWork(agentId: string): ReadonlyMap<string, { queue: Queue[] }> },
+  agentId: string,
+  taskId: string,
+): Queue[] {
+  return mailbox.taskWork(agentId).get(taskId)?.queue ?? [];
+}
+
 const projectRoot = process.env.OPENBOT_BACKLOG_TEST_ROOT ?? resolve(import.meta.dirname, "..");
 const output = join(projectRoot, ".openbot-build", "server-work-backlog-e2e");
 const report: { passed: boolean; checks: string[]; error?: string } = { passed: false, checks: [] };
@@ -109,7 +117,7 @@ async function fixture(): Promise<void> {
     assert.equal(isServerWorkThread(userMoved.work.taskId), true);
     assert.equal(userMoved.deliveryId, userId);
     assert.equal(userMoved.messageId, userRequest.messageId);
-    assert.equal(state.mailbox.taskQueue(worker.id, userMoved.work.taskId)[0]?.id, userId);
+    assert.equal(taskQueue(state.mailbox, worker.id, userMoved.work.taskId)[0]?.id, userId);
     assert.equal(
       state.mailbox.listQueue(worker.id).deliveries.some((delivery) => delivery.id === userId),
       false,
@@ -166,14 +174,14 @@ async function fixture(): Promise<void> {
     assert.equal(grouped.work.taskId, userMoved.work.taskId);
     assert.equal(state.tasks.openTaskIds(worker.id).length, beforeGroup);
     assert.deepEqual(
-      state.mailbox.taskQueue(worker.id, userMoved.work.taskId).map((delivery) => delivery.id),
+      taskQueue(state.mailbox, worker.id, userMoved.work.taskId).map((delivery) => delivery.id),
       [userId, relatedId],
     );
     const groupedRetry = await runCauseEffect(
       state.backlog.dispatch(worker.id, relatedId, undefined, userMoved.work.taskId),
     );
     assert.equal(groupedRetry.deliveryId, relatedId);
-    assert.equal(state.mailbox.taskQueue(worker.id, userMoved.work.taskId).length, 2);
+    assert.equal(taskQueue(state.mailbox, worker.id, userMoved.work.taskId).length, 2);
     report.checks.push(
       "Two selected related requests share one existing managed chat; retry does not duplicate either request.",
     );

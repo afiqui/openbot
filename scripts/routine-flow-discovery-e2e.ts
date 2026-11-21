@@ -347,7 +347,7 @@ async function fixture(): Promise<void> {
       createRoutineResults({
         store: resultStore,
         discovery: resultReader,
-        delivery: (id) => ({ turnId: `turn-${id}` }),
+        runTurns: (id) => ({ turnIds: [`turn-${id}`], waiting: false }),
         turnAnswer: (_agent, turnId) =>
           turnId === "turn-delivery-10" || turnId === "turn-delivery-failed"
             ? `Answer ${turnId}`
