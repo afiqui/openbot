@@ -285,7 +285,7 @@ const localServerControl = localServerChild
       logger.error("The local server has no control pipe from the desktop app:", toLogValue(cause)),
     )
   : null;
-if (serverMode || hostedServer || localServerChild) hideExceptionErrorBox();
+hideExceptionErrorBox();
 if (serverMode || hostedServer || localServerChild) keepWindowsHidden();
 if (localServerChild && process.platform === "darwin") app.dock?.hide();
 const inviteLinkOptions = {
