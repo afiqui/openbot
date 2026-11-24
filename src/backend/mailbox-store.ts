@@ -173,7 +173,13 @@ interface ConversationIndex {
   deliveriesByMessage: Map<string, StoredDelivery[]>;
   positions: Map<string, number>;
   turnIds: ReadonlyMap<string, string | undefined>;
-  entriesByAgent: Map<string, ConversationIndexEntry[]>;
+  entriesByAgent: Map<string, ConversationEntryScan>;
+  activePositions: Map<string, number[]> | undefined;
+}
+
+interface ConversationEntryScan {
+  entries: ConversationIndexEntry[];
+  next: number;
 }
 
 interface StoredState {
@@ -262,6 +268,7 @@ export interface CommittedChannelAttachments {
 }
 
 export const MAILBOX_CONVERSATION_MESSAGE_LIMIT = 100;
+const CONVERSATION_SCAN_STEP = 512;
 
 export const QUEUE_EDIT_HOLD_MS = 10 * 60_000;
 
@@ -1846,11 +1853,26 @@ export class MailboxStore {
     const { deliveriesByMessage, positions, turnIds } = index;
     const selectedStoredMessages: StoredMessage[] = [];
     let completedCount = 0;
-    for (const { message, active, conversationTime } of this.#conversationEntries(index, agentId)) {
+    const scan = this.#conversationScan(index, agentId);
+    let read = 0;
+    while (completedCount < limit) {
+      while (read >= scan.entries.length && scan.next >= 0) this.#extendConversationScan(index, agentId, scan);
+      const entry = scan.entries[read++];
+      if (!entry) break;
+      const { message, active, conversationTime } = entry;
       if (!active && options.fromCreatedAt && conversationTime < options.fromCreatedAt) continue;
-      if (!active && completedCount >= limit) continue;
       selectedStoredMessages.push(message);
       if (!active) completedCount += 1;
+    }
+    for (; read < scan.entries.length; read++) {
+      const entry = scan.entries[read];
+      if (entry?.active) selectedStoredMessages.push(entry.message);
+    }
+    for (const position of this.#activePositions(index).get(agentId) ?? []) {
+      if (position > scan.next) continue;
+      const message = index.messages[position];
+      const entry = message ? this.#conversationEntry(index, agentId, message) : null;
+      if (entry?.active) selectedStoredMessages.push(entry.message);
     }
     selectedStoredMessages.reverse();
     const messages: ConversationMessage[] = [];
@@ -1995,38 +2017,75 @@ export class MailboxStore {
       positions: this.#queuedPositions(),
       turnIds: this.#sourceTurnIds(),
       entriesByAgent: new Map(),
+      activePositions: undefined,
     };
     this.#keptConversationIndex = unsaved ? undefined : index;
     return index;
   }
 
-  #conversationEntries(index: ConversationIndex, agentId: string): ConversationIndexEntry[] {
+  #conversationScan(index: ConversationIndex, agentId: string): ConversationEntryScan {
     const known = index.entriesByAgent.get(agentId);
     if (known) return known;
-    const entries: ConversationIndexEntry[] = [];
-    for (let position = index.messages.length - 1; position >= 0; position -= 1) {
-      const message = index.messages[position];
-      if (!message || message.channelId || message.messaging) continue;
-      const ownMessage = message.sender.kind === "agent" && message.sender.agentId === agentId;
-      const deliveries = index.deliveriesByMessage.get(message.id) ?? [];
-      if (message.taskId && (!ownMessage || !deliveries.some((delivery) => delivery.recipientAgentId !== agentId)))
-        continue;
-      if ((message.messagingReturn || message.senderTaskId) && ownMessage) continue;
-      let relevant = ownMessage;
-      let active = false;
-      for (const delivery of deliveries) {
-        if (!ownMessage && delivery.recipientAgentId !== agentId) continue;
-        relevant = true;
-        if (isActiveDelivery(delivery)) active = true;
-      }
-      if (!relevant) continue;
-      const conversationTime = ownMessage
-        ? message.createdAt
-        : (deliveries.find((delivery) => delivery.recipientAgentId === agentId)?.steeredAt ?? message.createdAt);
-      entries.push({ message, active, conversationTime });
+    const scan: ConversationEntryScan = { entries: [], next: index.messages.length - 1 };
+    index.entriesByAgent.set(agentId, scan);
+    return scan;
+  }
+
+  #extendConversationScan(index: ConversationIndex, agentId: string, scan: ConversationEntryScan): void {
+    const stop = Math.max(-1, scan.next - CONVERSATION_SCAN_STEP);
+    for (; scan.next > stop; scan.next -= 1) {
+      const message = index.messages[scan.next];
+      const entry = message ? this.#conversationEntry(index, agentId, message) : null;
+      if (entry) scan.entries.push(entry);
     }
-    index.entriesByAgent.set(agentId, entries);
-    return entries;
+  }
+
+  #conversationEntry(index: ConversationIndex, agentId: string, message: StoredMessage): ConversationIndexEntry | null {
+    if (message.channelId || message.messaging) return null;
+    const ownMessage = message.sender.kind === "agent" && message.sender.agentId === agentId;
+    const deliveries = index.deliveriesByMessage.get(message.id) ?? [];
+    if (message.taskId && (!ownMessage || !deliveries.some((delivery) => delivery.recipientAgentId !== agentId)))
+      return null;
+    if ((message.messagingReturn || message.senderTaskId) && ownMessage) return null;
+    let relevant = ownMessage;
+    let active = false;
+    for (const delivery of deliveries) {
+      if (!ownMessage && delivery.recipientAgentId !== agentId) continue;
+      relevant = true;
+      if (isActiveDelivery(delivery)) active = true;
+    }
+    if (!relevant) return null;
+    const conversationTime = ownMessage
+      ? message.createdAt
+      : (deliveries.find((delivery) => delivery.recipientAgentId === agentId)?.steeredAt ?? message.createdAt);
+    return { message, active, conversationTime };
+  }
+
+  #activePositions(index: ConversationIndex): Map<string, number[]> {
+    if (index.activePositions) return index.activePositions;
+    const agentsByMessage = new Map<string, Set<string>>();
+    for (const delivery of index.deliveries) {
+      if (!isActiveDelivery(delivery)) continue;
+      const agents = agentsByMessage.get(delivery.messageId) ?? new Set<string>();
+      agents.add(delivery.recipientAgentId);
+      agentsByMessage.set(delivery.messageId, agents);
+    }
+    const positions = new Map<string, number[]>();
+    let remaining = agentsByMessage.size;
+    for (let position = index.messages.length - 1; position >= 0 && remaining > 0; position -= 1) {
+      const message = index.messages[position];
+      const agents = message ? agentsByMessage.get(message.id) : undefined;
+      if (!message || !agents) continue;
+      remaining -= 1;
+      if (message.sender.kind === "agent") agents.add(message.sender.agentId);
+      for (const agentId of agents) {
+        const list = positions.get(agentId) ?? [];
+        list.push(position);
+        positions.set(agentId, list);
+      }
+    }
+    index.activePositions = positions;
+    return positions;
   }
 
   reactionFor(

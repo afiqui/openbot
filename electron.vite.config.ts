@@ -28,7 +28,7 @@ export default defineConfig({
       ...perfProbesDefine,
       __OPENBOT_CUSTOM_SERVER_BUILD__: JSON.stringify({
         format: 1,
-        buildId: "server-work-sync-20261124",
+        buildId: "server-work-sync-20261124b",
         upstreamCommit: "20d1cd63d95ac91f049054b1afdd00ece27b322b",
         upstreamVersion: "0.77.0",
         builtAt: new Date().toISOString(),

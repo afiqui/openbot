@@ -34,6 +34,8 @@ import {
   requiredStringColumn,
 } from "./database-rows";
 
+const MESSAGE_SEARCH_MIN_CHARACTERS = 3;
+
 export interface ConversationQueriesOptions {
   core: DatabaseCore;
 }
@@ -485,7 +487,7 @@ export class ConversationQueries {
     includeSideThreads = false,
   ): ConversationSearchPage {
     const normalized = query.trim().replace(/\s+/g, " ").toLocaleLowerCase();
-    if (!normalized) return { results: [], total: 0, nextCursor: null };
+    if (normalized.length < MESSAGE_SEARCH_MIN_CHARACTERS) return { results: [], total: 0, nextCursor: null };
     const limit = pageLimit(requestedLimit);
     const offset = cursor ? decodeSearchCursor(cursor) : 0;
     const pattern = `%${escapeLike(normalized)}%`;
