@@ -110,7 +110,7 @@ export async function routeAgentConversation(
           },
           memberSender(member),
           isString(body.timezone) ? body.timezone : undefined,
-          // A peer without task screens must keep its message in the conversation it can read.
+          context.fromChrome,
           { allowAutomaticThread: capabilities.has(AGENT_TASKS_CAPABILITY) },
         ),
       ),

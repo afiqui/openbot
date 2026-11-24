@@ -108,6 +108,8 @@ export const SNAPSHOT_NAVIGATED_MESSAGE = "Page navigated during the browser sna
 
 const ACTION_TIMEOUT_MS = 10_000;
 const WAIT_TIMEOUT_MS = 30_000;
+const PAGE_ANSWER_WAIT_MS = 2_000;
+const PAGE_ANSWER_RETRY_MS = 100;
 const MAX_RESULT_BYTES = 64 * 1024;
 const DOCUMENT_ID_PROPERTY = "__openbot_browser_document_id__";
 const MAX_SNAPSHOT_FRAMES = 12;
@@ -427,7 +429,11 @@ export class BrowserCdpEngine {
     singlePassword: boolean,
   ): Effect.fn.Return<
     {
-      enter: (values: readonly string[], vault: boolean) => Effect.Effect<void, BrowserOperationError>;
+      enter: (
+        values: readonly string[],
+        vault: boolean,
+        onSubmitSent: () => void,
+      ) => Effect.Effect<void, BrowserOperationError>;
       clear: (secrets: readonly string[]) => Effect.Effect<boolean, BrowserOperationError>;
       hide: (secret: string, shown: boolean) => void;
       kinds: Array<{ password: boolean; oneTimeCode: boolean }>;
@@ -597,7 +603,7 @@ export class BrowserCdpEngine {
         node.sessionId,
         node.contextId,
       );
-    const enter = (values: readonly string[], vault: boolean) =>
+    const enter = (values: readonly string[], vault: boolean, onSubmitSent: () => void) =>
       Effect.gen({ self: this }, function* () {
         yield* Effect.gen({ self: this }, function* () {
           yield* this.#leaseEffect((send) =>
@@ -704,6 +710,7 @@ export class BrowserCdpEngine {
                 );
                 if (generation !== this.#documentGeneration)
                   return yield* browserFailure(new Error("Authentication page changed."));
+                onSubmitSent();
                 yield* dispatchMouseClick(send, point, "left", 1, 0, sessionId);
               } else if (submission === "enter") {
                 const last = nodes.inputs.at(-1);
@@ -720,6 +727,7 @@ export class BrowserCdpEngine {
                 )
                   return yield* browserFailure(new Error("Authentication target changed."));
                 yield* send("DOM.focus", { backendNodeId: last.backendNodeId }, last.sessionId);
+                onSubmitSent();
                 yield* dispatchShortcut(send, "Enter", last.sessionId);
               }
             }),
@@ -2278,6 +2286,37 @@ export class BrowserCdpEngine {
     return true;
   }
 
+  readonly pageAnswers = Effect.fn("BrowserCdp.pageAnswers")(function* (
+    this: BrowserCdpEngine,
+  ): Effect.fn.Return<boolean, BrowserOperationError> {
+    if (this.#disposed || this.#closing || this.#frozen || this.#dialog) return true;
+    if (this.#contents.isDestroyed() || this.#contents.isCrashed()) return true;
+    const pageDebugger = this.#contents.debugger;
+    this.#activeLeases += 1;
+    return yield* Effect.gen({ self: this }, function* () {
+      while (!this.#contents.isDestroyed()) {
+        if (!pageDebugger.isAttached()) {
+          yield* browserSync(() => pageDebugger.attach("1.3"));
+          this.#ownsDebugger = true;
+        }
+        const reply = yield* Effect.exit(
+          browserCall(() => pageDebugger.sendCommand("Runtime.evaluate", { expression: "0" })),
+        );
+        if (Exit.isSuccess(reply)) return;
+        yield* Effect.sleep(PAGE_ANSWER_RETRY_MS);
+      }
+    }).pipe(
+      Effect.timeoutOption(PAGE_ANSWER_WAIT_MS),
+      Effect.map(Option.isSome),
+      Effect.ensuring(
+        Effect.sync(() => {
+          this.#activeLeases -= 1;
+          this.#releaseIdleDebugger();
+        }),
+      ),
+    );
+  });
+
   readonly setIdleFocus = Effect.fn("BrowserCdp.setIdleFocus")(function* (
     this: BrowserCdpEngine,
     enabled: boolean,
@@ -3690,6 +3729,8 @@ export class BrowserCdpEngine {
   ): Effect.fn.Return<T, BrowserOperationError> {
     if (this.#disposed || this.#closing || this.#contents.isDestroyed())
       return yield* browserFailure(new Error("Browser tab was closed."));
+    if (this.#contents.isCrashed())
+      return yield* browserFailure(new Error("The page of this browser tab stopped. Load it again with navigate."));
     if (!this.#contents.debugger.isAttached()) {
       yield* browserSync(() => this.#contents.debugger.attach("1.3"));
       this.#ownsDebugger = true;

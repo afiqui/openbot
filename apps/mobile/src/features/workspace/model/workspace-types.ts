@@ -10,6 +10,7 @@ import type {
   AgentAnalyticsInput,
   AgentBackupModelSettings,
   AgentBrowserProfile,
+  AgentBuiltinMemorySettings,
   AgentDefaultsOverview,
   AgentExclusionChange,
   AgentFolderBrowse,
@@ -52,6 +53,9 @@ import type {
   BrowserProfileSummary,
   BrowserProxyList,
   BrowserProxySummary,
+  ChannelFolderChange,
+  ChannelFolderInput,
+  ChannelFolderList,
   ClearableStorageCategory,
   ClearBrowserDataInput,
   ConnectorMessagingPlatform,
@@ -80,10 +84,13 @@ import type {
   HostProviderAccounts,
   HostReleaseStatus,
   HostSetMessagingEnabledInput,
+  HostSignalHomeSettings,
   HostSkillLearning,
   HostTimezoneSettings,
   HostUpdateSettingsChange,
   HostUpdateStatus,
+  HostVoiceModel,
+  HostVoiceModelChange,
   InstallAgentTemplateInput,
   InstalledSkill,
   InstallMarketplaceAgentInput,
@@ -139,8 +146,10 @@ import type {
   SetMessagingEnabledInput,
   SetRoutineResultDestinationInput,
   SetWhatsAppOwnNumberInput,
+  SetWhatsAppSenderReadOnlyInput,
   SetWhatsAppStatusReactionsInput,
   SetWhatsAppWorkingMessageInput,
+  SetWorkflowPausedInput,
   SharedTable,
   SidebarLayoutAction,
   SidebarLayoutSnapshot,
@@ -153,6 +162,7 @@ import type {
   UpdateAgentAdminSettingsInput,
   UpdateAgentBackupModelsInput,
   UpdateAgentBrowserProfileInput,
+  UpdateAgentBuiltinMemoryInput,
   UpdateAgentDefaultsInput,
   UpdateAgentHostSettingsInput,
   UpdateAgentInput,
@@ -176,6 +186,9 @@ import type {
   WorkflowGitHubHistory,
   WorkflowGitHubRepositoryOptions,
   WorkflowGraph,
+  WorkflowMediaModel,
+  WorkflowMediaPriceRequest,
+  WorkflowMediaUnavailableModel,
   WorkflowRunDetail,
   WorkflowRunPage,
   WorkflowSaveResult,
@@ -219,6 +232,12 @@ import type { RemoteDesktopConnection } from "@/features/workspace/components/re
 import type { MobileConversationStore } from "./conversation-store";
 import type { LiveWorkspaceStore } from "./live-workspace-store";
 import type { PendingApproval } from "./pending-approvals";
+
+export interface WorkflowMediaModels {
+  models: readonly WorkflowMediaModel[];
+  unavailable?: readonly WorkflowMediaUnavailableModel[];
+  partial: boolean;
+}
 
 export interface AgentExportFile extends AgentExportParts {
   readAll: () => Promise<string>;
@@ -404,6 +423,13 @@ export interface MobileWorkspaceContextValue {
   canManageServerTimezone: (serverId: string) => boolean;
   loadServerTimezone: (serverId: string) => Promise<HostTimezoneSettings>;
   setServerTimezone: (timezone: string | null, serverId: string) => Promise<HostTimezoneSettings>;
+  canManageServerVoiceModel: (serverId: string) => boolean;
+  canManageServerSignalHome: (serverId: string) => boolean;
+  servesServerSignalHome: (serverId: string) => boolean;
+  loadServerSignalHome: (serverId: string) => Promise<HostSignalHomeSettings>;
+  setServerSignalHome: (home: string | null, serverId: string) => Promise<HostSignalHomeSettings>;
+  loadServerVoiceModel: (serverId: string) => Promise<HostVoiceModel>;
+  changeServerVoiceModel: (change: HostVoiceModelChange, serverId: string) => Promise<HostVoiceModel>;
   canManageAgentMemoryLimit: (serverId: string) => boolean;
   loadAgentMemoryLimit: (serverId: string) => Promise<HostAgentMemoryLimit>;
   setAgentMemoryLimit: (limit: number, serverId: string) => Promise<HostAgentMemoryLimit>;
@@ -513,6 +539,7 @@ export interface MobileWorkspaceContextValue {
   setWhatsAppOwnNumber: (input: SetWhatsAppOwnNumberInput, serverId: string) => Promise<void>;
   setWhatsAppWorkingMessage: (input: SetWhatsAppWorkingMessageInput, serverId: string) => Promise<void>;
   setWhatsAppStatusReactions: (input: SetWhatsAppStatusReactionsInput, serverId: string) => Promise<void>;
+  setWhatsAppSenderReadOnly: (input: SetWhatsAppSenderReadOnlyInput, serverId: string) => Promise<void>;
   serverUpdateAccess: (serverId: string) => ServerUpdateAccess | null;
   canReadServerRelease: (serverId: string) => boolean;
   loadServerUpdate: (serverId: string, access: ServerUpdateAccess) => Promise<HostUpdateStatus>;
@@ -630,6 +657,12 @@ export interface MobileWorkspaceContextValue {
   canManageAgentPlanCard: (serverId: string) => boolean;
   loadAgentPlanCard: (agentId: string, serverId: string) => Promise<AgentPlanCardSettings | null>;
   updateAgentPlanCard: (input: UpdateAgentPlanCardInput, serverId: string) => Promise<AgentPlanCardSettings>;
+  canManageAgentBuiltinMemory: (serverId: string) => boolean;
+  loadAgentBuiltinMemory: (agentId: string, serverId: string) => Promise<AgentBuiltinMemorySettings | null>;
+  updateAgentBuiltinMemory: (
+    input: UpdateAgentBuiltinMemoryInput,
+    serverId: string,
+  ) => Promise<AgentBuiltinMemorySettings>;
   canManageAgentDefaults: (serverId: string) => boolean;
   loadAgentDefaults: (serverId: string) => Promise<AgentDefaultsOverview | null>;
   updateAgentDefaults: (input: UpdateAgentDefaultsInput, serverId: string) => Promise<AgentDefaultsOverview>;
@@ -659,6 +692,11 @@ export interface MobileWorkspaceContextValue {
   excludeAgentFolder: (input: AgentFolderInput, serverId: string) => Promise<AgentExclusionChange>;
   includeAgentFolder: (input: AgentFolderInput, serverId: string) => Promise<AgentExclusionChange>;
   browseAgentFolders: (agentId: string, path: string | null, serverId: string) => Promise<AgentFolderBrowse>;
+  canManageChannelFolders: (serverId: string) => boolean;
+  loadChannelFolders: (channelId: string, serverId: string) => Promise<ChannelFolderList>;
+  addChannelFolder: (input: ChannelFolderInput, serverId: string) => Promise<ChannelFolderChange>;
+  removeChannelFolder: (input: ChannelFolderInput, serverId: string) => Promise<ChannelFolderChange>;
+  browseChannelFolders: (channelId: string, path: string | null, serverId: string) => Promise<AgentFolderBrowse>;
   startNewChat: (agentId: string, serverId: string) => Promise<void>;
   canUseLiveVoice: (serverId: string) => boolean;
   startLiveVoice: (input: LiveVoiceStartRequest, serverId: string) => Promise<LiveVoiceSessionResponse>;
@@ -696,6 +734,7 @@ export interface MobileWorkspaceContextValue {
   loadWorkflow: (workflowId: string, serverId: string) => Promise<WorkflowDetail>;
   createWorkflow: (input: CreateWorkflowInput, serverId: string) => Promise<WorkflowDetail>;
   renameWorkflow: (input: RenameWorkflowInput, serverId: string) => Promise<WorkflowSummary>;
+  setWorkflowPaused: (input: SetWorkflowPausedInput, serverId: string) => Promise<WorkflowSummary>;
   deleteWorkflow: (workflowId: string, serverId: string) => Promise<void>;
   saveWorkflowGraph: (input: SaveWorkflowGraphInput, serverId: string) => Promise<WorkflowSaveResult>;
   loadWorkflowRuns: (workflowId: string, serverId: string, before?: string) => Promise<WorkflowRunPage>;
@@ -712,10 +751,18 @@ export interface MobileWorkspaceContextValue {
   restoreWorkflowVersion: (input: WorkflowVersionInput, serverId: string) => Promise<WorkflowDetail>;
   canUseWorkflowGitHub: (serverId: string) => boolean;
   canUseWorkflowChats: (serverId: string) => boolean;
+  canUseWorkflowMedia: (serverId: string) => boolean;
+  canUseWorkflowMediaSize: (serverId: string) => boolean;
+  canUseWorkflowAssets: (serverId: string) => boolean;
+  canPauseWorkflows: (serverId: string) => boolean;
+  loadWorkflowMediaModels: (serverId: string) => Promise<WorkflowMediaModels>;
+  loadWorkflowMediaPrice: (input: WorkflowMediaPriceRequest, serverId: string) => Promise<number | null>;
+  loadWorkflowCreditBalance: (serverId: string) => Promise<number | null>;
   loadWorkflowGitHubCatalog: (serverId: string) => Promise<WorkflowGitHubCatalog>;
   loadWorkflowGitHubOptions: (repository: string, serverId: string) => Promise<WorkflowGitHubRepositoryOptions>;
   loadWorkflowGitHubHistory: (workflowId: string, serverId: string) => Promise<WorkflowGitHubHistory>;
   runWorkflowGitHubLastEvent: (input: WorkflowTriggerInput, serverId: string) => Promise<WorkflowRunDetail>;
+  keepWorkflowPicture: (draftId: string, serverId: string) => Promise<{ fileId: string }>;
   loadAgentTasks: (agentId: string, serverId: string) => Promise<AgentTasksSnapshot>;
   loadAgentTaskConversation: (input: AgentTaskInput, serverId: string) => Promise<ConversationSnapshot>;
   startAgentTask: (
@@ -809,6 +856,10 @@ export type MobileWorkspaceCapabilityCheck =
   | "canUseWorkflows"
   | "canUseWorkflowGitHub"
   | "canUseWorkflowChats"
+  | "canUseWorkflowMedia"
+  | "canUseWorkflowMediaSize"
+  | "canUseWorkflowAssets"
+  | "canPauseWorkflows"
   | "canReadServerStorage"
   | "canOrganizeLibrary"
   | "canControlComputer"
@@ -823,6 +874,9 @@ type ServerCheckKey =
   | "canCreateLocalServers"
   | "canRestartServerItself"
   | "canManageServerTimezone"
+  | "canManageServerVoiceModel"
+  | "canManageServerSignalHome"
+  | "servesServerSignalHome"
   | "canReadMachineMetrics"
   | "canManageAgentMemoryLimit"
   | "canManageMemoryReview"
@@ -866,6 +920,7 @@ type ServerCheckKey =
   | "canManageAgentSkills"
   | "canManageSharedTables"
   | "canManageAgentFolders"
+  | "canManageChannelFolders"
   | "canNestSidebarFolders"
   | "canManageAgentAccess"
   | "canManageAgentHostSettings"
@@ -873,6 +928,7 @@ type ServerCheckKey =
   | "canManageAgentTaskLimit"
   | "canManageAgentNewChat"
   | "canManageAgentPlanCard"
+  | "canManageAgentBuiltinMemory"
   | "canManageAgentDefaults"
   | "canManageBackgroundProcesses"
   | "canManageAgentInstructions"

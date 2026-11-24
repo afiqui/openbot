@@ -6,7 +6,7 @@ import type { DynamicRecord } from "@openbot/contracts/runtime-values";
 import { sourceText } from "@openbot/i18n/source";
 import { Deferred, Effect, Exit } from "effect";
 import { assertAgentArgs, assertWindowsScriptArgs, resolveAgentCommand } from "./acp-agent-command";
-import type { AcpHistoryPersistence } from "./acp-client";
+import { type AcpHistoryPersistence, withStartModels } from "./acp-client";
 import { type AcpFlavor, customAgentFlavor } from "./acp-flavor";
 import { type AgentClient, AgentProcessExitError, type DiagnosticOrigin } from "./agent-client";
 import { agentLaunchPath } from "./cli";
@@ -97,6 +97,11 @@ function childKey(agentId: string, folder: string | null): string {
   return `${agentId}\0${folder ?? ""}`;
 }
 
+function folderOfChildKey(key: string): string | null {
+  const folder = key.slice(key.indexOf("\0") + 1);
+  return folder === "" ? null : folder;
+}
+
 function requiredCwd(params: unknown): string {
   const cwd = getString(params, "cwd");
   if (!cwd) throw new Error("cwd is required.");
@@ -114,6 +119,9 @@ export class CustomAcpAgentsClient extends EventEmitter<ClientEvents> implements
   readonly #confined: boolean;
   readonly #children = new Map<string, Deferred.Deferred<AgentClient, ProviderClientOperationError>>();
   readonly #sessions = new Map<string, HeldSession>();
+  readonly #sessionKeys = new Set<string>();
+  readonly #historyReaders = new Map<AgentClient, number>();
+  readonly #importChildren = new WeakSet<AgentClient>();
   readonly #requests = new Map<RequestId, { child: AgentClient; id: RequestId }>();
   #nextRequestId = 0;
   readonly #lastModels = new Map<string, ModelEntry[]>();
@@ -138,9 +146,16 @@ export class CustomAcpAgentsClient extends EventEmitter<ClientEvents> implements
     return this.#running;
   }
 
+  #sessionChildren(): Set<AgentClient> {
+    return new Set([...this.#sessions.values()].map(({ child }) => child));
+  }
+
   canReleaseProcess(): boolean {
-    const children = new Set([...this.#sessions.values()].map(({ child }) => child));
-    return [...children].every((child) => child.canReleaseProcess?.() !== false);
+    return [...this.#sessionChildren()].every((child) => child.canReleaseProcess?.() !== false);
+  }
+
+  runsBackgroundWork(): boolean {
+    return [...this.#sessionChildren()].some((child) => child.runsBackgroundWork?.() === true);
   }
 
   readonly readHistory = Effect.fn("CustomAcp.readHistory")(function* (
@@ -181,22 +196,59 @@ export class CustomAcpAgentsClient extends EventEmitter<ClientEvents> implements
       if (history && durableReplay && !request.providerOnly) yield* readStored(request);
       return;
     }
+    const key = childKey(agentId, request.cwd);
+    const startedForImport = request.providerOnly === true && !this.#children.has(key);
     const child = yield* this.#child(agentId, request.cwd).pipe(toProviderClientOperationError);
-    if (!child.readHistory) return;
+    if (startedForImport) this.#importChildren.add(child);
+    this.#historyReaders.set(child, (this.#historyReaders.get(child) ?? 0) + 1);
+    const endRead = Effect.suspend(() => {
+      const left = (this.#historyReaders.get(child) ?? 1) - 1;
+      if (left > 0) {
+        this.#historyReaders.set(child, left);
+        return Effect.void;
+      }
+      this.#historyReaders.delete(child);
+      return this.#importChildren.has(child) ? this.#releaseHistoryChild(key, child) : Effect.void;
+    });
+    if (!child.readHistory) return yield* endRead;
     const sessionId = ownSessionId(request.threadId, agentId, request.cwd);
     yield* child
       .readHistory({ ...request, threadId: sessionId, ...(durableReplay ? { providerOnly: true } : {}) }, consume)
-      .pipe(toProviderClientOperationError);
+      .pipe(toProviderClientOperationError, Effect.ensuring(endRead));
   });
+
+  readonly #releaseHistoryChild = Effect.fn("CustomAcp.releaseHistoryChild")(function* (
+    this: CustomAcpAgentsClient,
+    key: string,
+    child: AgentClient,
+  ) {
+    const pending = this.#children.get(key);
+    if (!pending || this.#sessionKeys.has(key)) return;
+    const started = yield* Effect.exit(Deferred.await(pending));
+    if (Exit.isFailure(started) || started.value !== child || this.#children.get(key) !== pending) return;
+    if (this.#sessionKeys.has(key) || this.#historyReaders.has(child) || child.canReleaseProcess?.() === false) return;
+    this.#children.delete(key);
+    this.#dropRequestsOf(child);
+    yield* child.stop().pipe(Effect.ignore);
+  }, Effect.uninterruptible);
+
+  #dropRequestsOf(child: AgentClient): void {
+    for (const [id, request] of this.#requests) if (request.child === child) this.#requests.delete(id);
+  }
 
   start(): void {
     this.#running = true;
+  }
+
+  markTurnsStoppedForShutdown(): void {
+    for (const child of this.#sessionChildren()) child.markTurnsStoppedForShutdown?.();
   }
 
   readonly stop = Effect.fn("CustomAcp.stop")(function* (this: CustomAcpAgentsClient) {
     this.#running = false;
     const children = [...this.#children.values()];
     this.#children.clear();
+    this.#sessionKeys.clear();
     this.#sessions.clear();
     this.#requests.clear();
     yield* Effect.forEach(
@@ -209,6 +261,31 @@ export class CustomAcpAgentsClient extends EventEmitter<ClientEvents> implements
       { concurrency: "unbounded", discard: true },
     );
   });
+
+  readonly releaseFolderProcesses = Effect.fn("CustomAcp.releaseFolderProcesses")(function* (
+    this: CustomAcpAgentsClient,
+    folder: string,
+  ) {
+    let matched = false;
+    let kept = false;
+    for (const [key, pending] of [...this.#children]) {
+      if (folderOfChildKey(key) !== folder) continue;
+      matched = true;
+      const started = yield* Effect.exit(Deferred.await(pending));
+      if (Exit.isFailure(started) || this.#children.get(key) !== pending) continue;
+      const child = started.value;
+      if (child.canReleaseProcess?.() === false) {
+        kept = true;
+        continue;
+      }
+      this.#children.delete(key);
+      this.#sessionKeys.delete(key);
+      for (const [threadId, held] of this.#sessions) if (held.child === child) this.#sessions.delete(threadId);
+      this.#dropRequestsOf(child);
+      yield* child.stop().pipe(Effect.ignore);
+    }
+    return matched ? kept : null;
+  }, Effect.uninterruptible);
 
   readonly mcpToolsFixedAtStart = (externalThreadId: string): boolean =>
     this.#flavorOf(sessionAgent(externalThreadId))?.mcpToolsFixedAtStart === true;
@@ -307,6 +384,7 @@ export class CustomAcpAgentsClient extends EventEmitter<ClientEvents> implements
         case "thread/start": {
           const agentId = yield* customStep(() => this.#modelAgent(params));
           const cwd = yield* customStep(() => requiredCwd(params));
+          this.#sessionKeys.add(childKey(agentId, cwd));
           const child = yield* this.#child(agentId, cwd).pipe(toProviderClientOperationError);
           const response = yield* child
             .request(method, forChild(params, null), decodeRecordResponse, timeoutMs)
@@ -325,6 +403,7 @@ export class CustomAcpAgentsClient extends EventEmitter<ClientEvents> implements
           const threadId = getString(params, "threadId") ?? "";
           const agentId = yield* customStep(() => this.#routedAgent(params));
           const cwd = yield* customStep(() => requiredCwd(params));
+          this.#sessionKeys.add(childKey(agentId, cwd));
           const child = yield* this.#child(agentId, cwd).pipe(toProviderClientOperationError);
           const held = { child, sessionId: ownSessionId(threadId, agentId, cwd) };
           this.#sessions.set(threadId, held);
@@ -549,8 +628,9 @@ export class CustomAcpAgentsClient extends EventEmitter<ClientEvents> implements
         Effect.tap((current) =>
           Effect.sync(() => {
             if (current !== child || !this.#running) return;
-            if (folder === null) {
+            if (folder === null || !this.#sessionKeys.has(key)) {
               if (this.#children.get(key) === pending) this.#children.delete(key);
+              this.#dropRequestsOf(child);
               return;
             }
             this.#running = false;
@@ -599,6 +679,15 @@ export class CustomAcpAgentsClient extends EventEmitter<ClientEvents> implements
       : redacted;
   }
 
+  readonly #discoveryChild = Effect.fn("CustomAcp.discoveryChild")(function* (
+    this: CustomAcpAgentsClient,
+    agentId: string,
+  ) {
+    const started = !this.#children.has(childKey(agentId, null));
+    const child = yield* this.#child(agentId, null);
+    return { child, started };
+  });
+
   readonly #listModels = Effect.fn("CustomAcp.listModels")(function* (
     this: CustomAcpAgentsClient,
     params: unknown,
@@ -608,12 +697,12 @@ export class CustomAcpAgentsClient extends EventEmitter<ClientEvents> implements
     const lists = yield* Effect.forEach(
       configs,
       (config) =>
-        this.#child(config.id, null)
+        this.#discoveryChild(config.id)
           .pipe(toProviderClientOperationError)
           .pipe(
-            Effect.flatMap((child) =>
+            Effect.flatMap(({ child, started }) =>
               child
-                .request("model/list", params, decodeModelListResponse, timeoutMs)
+                .request("model/list", started ? withStartModels(params) : params, decodeModelListResponse, timeoutMs)
                 .pipe(toProviderClientOperationError),
             ),
             Effect.timeoutOrElse({
