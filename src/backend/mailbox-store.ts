@@ -1488,7 +1488,7 @@ export class MailboxStore {
         }
       }
       const { ids, deliveries } = found();
-      const previous = structuredClone(this.#state);
+      const previous = this.#rollbackPoint();
       const files = this.#state.messages.filter((message) => ids.has(message.id)).flatMap(messageFiles);
       this.#state.messages = this.#state.messages.filter((message) => !ids.has(message.id));
       this.#state.deliveries = this.#state.deliveries.filter((delivery) => !ids.has(delivery.messageId));
@@ -1570,7 +1570,7 @@ export class MailboxStore {
           (reaction.agentId === agentId && shown.has(reaction.messageId)) || removedMessageIds.has(reaction.messageId),
       );
       if (personal.length === 0 && reactions.length === 0) return "deleted";
-      const previous = structuredClone(this.#state);
+      const previous = this.#rollbackPoint();
       const deletions: string[] = [];
       const removedDeliveryIds = new Set(personal.map(({ delivery }) => delivery.id));
       this.#state.deliveries = this.#state.deliveries.filter((candidate) => !removedDeliveryIds.has(candidate.id));
@@ -1646,7 +1646,7 @@ export class MailboxStore {
       if (messages.length === 0) return;
       const removed = new Set(messages);
       const removedIds = new Set(messages.map((message) => message.id));
-      const previous = structuredClone(this.#state);
+      const previous = this.#rollbackPoint();
       this.#state.messages = this.#state.messages.filter((candidate) => !removed.has(candidate));
       for (const id of removedIds) this.#changes.messageIds.add(id);
       const reactions = this.#state.reactions.filter((reaction) => removedIds.has(reaction.messageId));
@@ -2493,7 +2493,7 @@ export class MailboxStore {
     channelThreadIds: readonly string[] = [],
   ): Effect.fn.Return<void, StoredStateFailure> {
     try {
-      const previous = structuredClone(this.#state);
+      const previous = this.#rollbackPoint();
       const removedMessageIds = new Set<string>();
       const channelThreads = new Set(channelThreadIds);
       const removedGenerated = this.#state.generatedAttachments.filter(
@@ -2554,7 +2554,7 @@ export class MailboxStore {
     threadIds: readonly string[] = [],
   ): Effect.fn.Return<void, StoredStateFailure> {
     try {
-      const previous = structuredClone(this.#state);
+      const previous = this.#rollbackPoint();
       const removedMessageIds = new Set(
         this.#state.messages.filter((message) => message.channelId === channelId).map((message) => message.id),
       );
@@ -4062,6 +4062,9 @@ export class MailboxStore {
     });
   });
 
+  #rollbackPoint(): StoredState {
+    return { ...this.#state, idempotency: { ...this.#state.idempotency } };
+  }
   #persist(
     eventType = "mailbox.updated",
     commandId = `mailbox:${eventType}:${randomUUID()}`,
