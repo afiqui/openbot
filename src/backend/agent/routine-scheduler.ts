@@ -79,6 +79,8 @@ import {
   webhookToolTrigger,
 } from "./webhook-routine-tool";
 
+const SETTLED_DELIVERY_LIMIT = 20_000;
+
 export interface RoutineMutationOptions {
   recordConversationEvent?: boolean;
   turnId?: string | undefined;
@@ -150,6 +152,7 @@ export class RoutineScheduler implements RoutineDueSource {
   readonly #workflowRuns: WorkflowRunStore;
   readonly #waits: AgentWaits;
   readonly #deletionAgents = new Set<string>();
+  readonly #settledDeliveries = new Map<string, string>();
   readonly #timer: RoutineTimer;
   readonly #timezone: () => string;
   readonly #webhookRoutines: (() => WebhookRoutineWriter) | undefined;
@@ -898,15 +901,27 @@ export class RoutineScheduler implements RoutineDueSource {
 
   reconcileDelivery(delivery: QueueDelivery): boolean {
     if (delivery.sender.kind !== "routine") return false;
+    const settledKey = `${delivery.status}\u0000${delivery.error ?? ""}`;
+    if (this.#settledDeliveries.get(delivery.id) === settledKey) return false;
     const run = this.#routines.runForDelivery(delivery.id);
     if (!run || run.status === "cancelled") return false;
     const status = routineStatusForDelivery(delivery);
     if (run.status === "needs-attention" && ["starting", "running"].includes(delivery.status)) return false;
     const error = status === "failed" ? failedRunReason(delivery.error, run) : delivery.error;
-    if (run.status === status && run.error === error) return false;
+    if (run.status === status && run.error === error) {
+      if (status !== "queued" && status !== "running") this.#rememberSettled(delivery.id, settledKey);
+      return false;
+    }
     if (status === "queued") this.#routines.updateRunStatus(run.id, status, error);
     else this.#transitionRunWithConversation(run, status, error);
     return true;
+  }
+
+  #rememberSettled(deliveryId: string, key: string): void {
+    this.#settledDeliveries.set(deliveryId, key);
+    if (this.#settledDeliveries.size <= SETTLED_DELIVERY_LIMIT) return;
+    const oldest = this.#settledDeliveries.keys().next().value;
+    if (oldest !== undefined) this.#settledDeliveries.delete(oldest);
   }
 
   markNeedsAttention(turnId: string | null): void {
